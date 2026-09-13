@@ -349,3 +349,79 @@ private func sampleConn(ts: Timestamp, uid: Int64) -> ConnRecord {
     c.respPkts = 6
     return c
 }
+
+/// Checkpointing has its own schedule because wal_autocheckpoint is off, and
+/// nothing else shrinks the WAL. Observed on a live install: 45 minutes of
+/// ordinary browsing produced an 8 KB database and a 48 MB WAL.
+func runCheckpointTests() async {
+    await NMTest.suite("StoreWriter / checkpointing") {
+
+        await NMTest.test("the WAL is reclaimed once it passes the threshold") {
+            let root = temporaryRootForCheckpoint()
+            defer { try? FileManager.default.removeItem(atPath: root) }
+            let paths = Paths.temporary(root)
+            let writer = try StoreWriter(paths: paths)
+
+            let base: Timestamp = 1_789_257_600_000_000
+            for chunk in 0..<12 {
+                var batch = RecordBatch()
+                for i in 0..<4_000 {
+                    let uid = chunk * 4_000 + i
+                    batch.conns.append(sampleConnForCheckpoint(
+                        ts: base + Timestamp(uid), uid: Int64(uid)))
+                }
+                try await writer.write(batch)
+            }
+            try await writer.flush()
+
+            let before = await writer.walBytes()
+            NMTest.expect(before > 0, "the WAL should hold the writes")
+
+            // A low threshold so the test does not have to generate 16 MB.
+            _ = await writer.checkpointIfNeeded(thresholdBytes: 64 * 1024)
+            let after = await writer.walBytes()
+
+            NMTest.expect(after < before,
+                          "WAL went \(before) -> \(after); it must shrink")
+            NMTest.expect(await writer.stats.checkpoints > 0)
+
+            // The rows must still be there afterwards.
+            let counts = try await writer.rowCounts()
+            NMTest.equal(counts.conn, 48_000)
+            await writer.close()
+        }
+
+        await NMTest.test("a small WAL is left alone") {
+            let root = temporaryRootForCheckpoint()
+            defer { try? FileManager.default.removeItem(atPath: root) }
+            let writer = try StoreWriter(paths: Paths.temporary(root))
+
+            var batch = RecordBatch()
+            batch.conns = [sampleConnForCheckpoint(ts: 1_789_257_600_000_000, uid: 1)]
+            try await writer.write(batch)
+
+            _ = await writer.checkpointIfNeeded(thresholdBytes: 64 * 1024 * 1024)
+            NMTest.equal(await writer.stats.checkpoints, 0,
+                         "checkpointing a tiny WAL is pure overhead")
+            await writer.close()
+        }
+    }
+}
+
+private func temporaryRootForCheckpoint() -> String {
+    let path = NSTemporaryDirectory()
+        + "nm-ckpt-\(getpid())-\(Int.random(in: 0...99999))"
+    try? FileManager.default.removeItem(atPath: path)
+    return path
+}
+
+private func sampleConnForCheckpoint(ts: Timestamp, uid: Int64) -> ConnRecord {
+    var c = ConnRecord(uid: FlowID(raw: UInt64(uid)), ts: ts, proto: 6,
+                       origAddr: IPAddress("10.0.0.1")!, origPort: 40000,
+                       respAddr: IPAddress("8.8.8.8")!, respPort: 443,
+                       iface: "en0", state: .sf, history: "ShADadFf", pid: 501)
+    c.tsEnd = ts + 1000
+    c.origIPBytes = 1000
+    c.respIPBytes = 2000
+    return c
+}

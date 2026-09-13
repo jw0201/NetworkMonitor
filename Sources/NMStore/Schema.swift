@@ -43,7 +43,11 @@ public enum Schema {
         // The daemon checkpoints deliberately (at rotation, at shutdown) rather
         // than letting a checkpoint land in the middle of a write batch.
         try db.exec("PRAGMA wal_autocheckpoint = 0")
-        try db.exec("PRAGMA journal_size_limit = 67108864")
+        // 16 MB, not 64. This is the size the WAL is trimmed back to AFTER a
+        // checkpoint, so it is the steady-state footprint rather than a
+        // ceiling on growth -- a limit above the WAL's working size never
+        // fires at all.
+        try db.exec("PRAGMA journal_size_limit = 16777216")
         try db.exec("PRAGMA cache_size = -32768")          // 32 MiB
         try db.exec("PRAGMA mmap_size = 268435456")        // 256 MiB (build cap is 1 GiB)
         // ENABLE_SETLK_TIMEOUT is compiled in, so this is a real blocking wait

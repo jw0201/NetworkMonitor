@@ -186,6 +186,7 @@ private final class DaemonCoordinator: @unchecked Sendable {
 
     private var lastRetention = Date.distantPast
     private var lastFlush = Date()
+    private var lastCheckpoint = Date()
 
     private func tick() async {
         let now = Timestamp(Date().timeIntervalSince1970 * 1_000_000)
@@ -204,6 +205,20 @@ private final class DaemonCoordinator: @unchecked Sendable {
                 catch {
                     log.error("write failed: \(String(describing: error), privacy: .public)")
                 }
+            }
+        }
+
+        // The WAL needs its own schedule. With wal_autocheckpoint off -- so a
+        // checkpoint cannot land mid-batch -- nothing else would ever shrink
+        // it: observed on a live install, 45 minutes of browsing produced an
+        // 8 KB database and a 48 MB WAL.
+        if Date().timeIntervalSince(lastCheckpoint) >= 30 {
+            lastCheckpoint = Date()
+            let after = await writer.checkpointIfNeeded()
+            if after > 256 * 1024 * 1024 {
+                log.error("""
+                    write-ahead log is \(after) bytes after a checkpoint;                     a long-running reader may be holding it open
+                    """)
             }
         }
 

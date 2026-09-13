@@ -32,6 +32,8 @@ public struct WriterStats: Sendable, Equatable {
     public var rollupFlushes: Int64 = 0
     public var execInterned: Int64 = 0
     public var rotations: Int64 = 0
+    public var checkpoints: Int64 = 0
+    public var walBytesReclaimed: Int64 = 0
 
     public var totalRows: Int64 { connRows + dnsRows + sslRows }
 
@@ -646,11 +648,64 @@ public actor StoreWriter {
         return out
     }
 
-    /// Folds the WAL back into the main database. Deliberate rather than
-    /// automatic (wal_autocheckpoint is 0) so a checkpoint never lands in the
-    /// middle of a write batch.
+    /// Folds the WAL back into the main database.
+    ///
+    /// Deliberate rather than automatic (wal_autocheckpoint is 0) so a
+    /// checkpoint never lands in the middle of a write batch -- but that means
+    /// SOMETHING has to call this on a schedule. Observed on a live install:
+    /// 45 minutes of ordinary browsing produced an 8 KB database and a 48 MB
+    /// WAL, because the only checkpoints were at rotation and shutdown.
+    /// journal_size_limit does not help, since it is only applied when a
+    /// checkpoint runs.
     public func checkpoint() throws {
         _ = try db.scalarInt("PRAGMA wal_checkpoint(TRUNCATE)")
+    }
+
+    /// Checkpoints when the WAL has grown past `thresholdBytes`.
+    ///
+    /// Two modes, because they do different things and confusing them is how
+    /// the WAL grew to 48 MB against an 8 KB database on a live install:
+    ///
+    ///   * PASSIVE moves WAL content into the database without waiting for
+    ///     readers, but does NOT shrink the file -- the space is reused, not
+    ///     returned. On its own it bounds nothing that a person watching disk
+    ///     usage would notice.
+    ///   * TRUNCATE returns the space, but blocks until readers are clear.
+    ///
+    /// So: PASSIVE first, which is cheap and usually enough to let the file be
+    /// reused; then TRUNCATE only if the file is still oversized, which is the
+    /// case where the pause is worth it. journal_size_limit also has to be
+    /// BELOW the working size or it never fires -- it is the size the WAL is
+    /// trimmed back to, not a ceiling on growth.
+    @discardableResult
+    public func checkpointIfNeeded(thresholdBytes: Int64 = 16 * 1024 * 1024) -> Int64 {
+        let walPath = paths.liveDatabase + "-wal"
+        let size = Partition.fileSize(walPath)
+        guard size >= thresholdBytes else { return size }
+
+        for alias in ["main", "meta", "roll", "pcapx"] {
+            _ = try? db.scalarInt("PRAGMA \(alias).wal_checkpoint(PASSIVE)")
+        }
+
+        var after = Partition.fileSize(walPath)
+        if after >= thresholdBytes {
+            // A passive pass did not free it, so a reader is holding the WAL
+            // open or the content could not be moved. Take the pause.
+            for alias in ["main", "meta", "roll", "pcapx"] {
+                _ = try? db.scalarInt("PRAGMA \(alias).wal_checkpoint(TRUNCATE)")
+            }
+            after = Partition.fileSize(walPath)
+        }
+
+        stats.checkpoints += 1
+        stats.walBytesReclaimed += max(0, size - after)
+        return after
+    }
+
+    /// Current WAL size, for the status the UI shows.
+    public func walBytes() -> Int64 {
+        Partition.fileSize(paths.liveDatabase + "-wal")
+            + Partition.fileSize(paths.metaDatabase + "-wal")
     }
 
     // MARK: - Introspection, for the benchmark and the Settings screen
