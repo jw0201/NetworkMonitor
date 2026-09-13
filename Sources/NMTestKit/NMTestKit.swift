@@ -50,6 +50,26 @@ public enum NMTest {
                              : "  \u{001B}[32mok\u{001B}[0m    \(name)")
     }
 
+    /// Async variant, for anything that has to await an actor.
+    public static func test(_ name: String, _ body: () async throws -> Void) async {
+        testName = name
+        testCount += 1
+        failedThisTest = false
+        do {
+            try await body()
+        } catch {
+            record("threw unexpectedly: \(error)", file: #file, line: #line)
+        }
+        print(failedThisTest ? "  \u{001B}[31mFAIL\u{001B}[0m  \(name)"
+                             : "  \u{001B}[32mok\u{001B}[0m    \(name)")
+    }
+
+    public static func suite(_ name: String, _ body: () async -> Void) async {
+        suiteName = name
+        print("\n\u{001B}[1m\(name)\u{001B}[0m")
+        await body()
+    }
+
     private static func record(_ message: String, file: String, line: Int) {
         failedThisTest = true
         failures.append(TestFailure(suite: suiteName, test: testName,

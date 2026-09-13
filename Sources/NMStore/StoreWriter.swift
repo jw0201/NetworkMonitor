@@ -31,6 +31,7 @@ public struct WriterStats: Sendable, Equatable {
     public var shedRows: Int64 = 0
     public var rollupFlushes: Int64 = 0
     public var execInterned: Int64 = 0
+    public var rotations: Int64 = 0
 
     public var totalRows: Int64 { connRows + dnsRows + sslRows }
 
@@ -93,6 +94,19 @@ public actor StoreWriter {
 
     public private(set) var stats = WriterStats()
 
+    /// Retention settings. System-wide policy, not a per-user preference:
+    /// changing it deletes other users' data.
+    public var policy = RetentionPolicy()
+
+    /// The UTC day the live file currently covers.
+    ///
+    /// Derived from the DATA, not from the wall clock. Taking it from the clock
+    /// at startup means a writer replaying an older capture rotates on its very
+    /// first write, archiving an empty partition and putting the real data in
+    /// the "next" day. It stays nil until the first record decides it, or is
+    /// recovered from rows already in the live file after a restart.
+    public private(set) var currentDay: String?
+
     // MARK: - Lifecycle
 
     public init(paths: Paths, createDirectories: Bool = true) throws {
@@ -123,6 +137,11 @@ public actor StoreWriter {
 
         self.execCache = try Self.loadExecCache(db)
         self.ifaceCache = try Self.loadIfaceCache(db)
+        // After a restart the live file may already hold a day's rows; adopt
+        // their day rather than starting a new one.
+        if let latest = try? db.scalarInt("SELECT max(ts) FROM conn"), latest > 0 {
+            self.currentDay = Time.utcDayString(latest)
+        }
     }
 
     private static func attach(_ db: SQLiteConnection, path: String, alias: String,
@@ -294,6 +313,14 @@ public actor StoreWriter {
 
     public func write(_ batch: RecordBatch) throws {
         guard !batch.isEmpty else { return }
+
+        // Rotation is checked on the write path rather than on a timer, so a
+        // daemon that was asleep across midnight rotates on its next write
+        // instead of writing a second day into yesterday's partition.
+        if let first = batch.conns.first?.ts ?? batch.dns.first?.ts ?? batch.ssl.first?.ts {
+            try rotateIfNeeded(now: first)
+        }
+
         let started = DispatchTime.now().uptimeNanoseconds
 
         try db.transaction {
@@ -513,6 +540,110 @@ public actor StoreWriter {
         try db.transaction {
             try writeRollups(upTo: Int64.max)
         }
+    }
+
+    // MARK: - Rotation
+
+    /// Rotates when the day changes or the live file grows past its cap.
+    @discardableResult
+    public func rotateIfNeeded(now: Timestamp) throws -> SealedArchive? {
+        let day = Time.utcDayString(now)
+        guard let open = currentDay else {
+            // First record ever: it defines the day, and there is nothing to
+            // rotate.
+            currentDay = day
+            return nil
+        }
+        let oversized = Partition.fileSize(paths.liveDatabase) > policy.maximumLiveBytes
+        guard day != open || oversized else { return nil }
+        return try rotate(closing: open, newDay: day)
+    }
+
+    /// Closes the live partition, renames it into the archive, seals it, and
+    /// opens a fresh one.
+    ///
+    /// Writers are blocked for the duration, which is milliseconds: the
+    /// expensive part is the rename, and rename is O(1). The sealing that
+    /// follows -- index building and compaction -- happens on the archive,
+    /// which nothing is writing to any more.
+    @discardableResult
+    public func rotate(closing day: String, newDay: String) throws -> SealedArchive? {
+        try flush()
+        try checkpoint()
+        try? db.exec("PRAGMA optimize")
+        db.close()
+
+        let archivePath: String
+        do {
+            archivePath = try Partition.rotate(paths: paths, day: day)
+        } catch {
+            // Reopen regardless: a failed rotation must not leave the daemon
+            // with no database to write to.
+            try reopenLive()
+            throw error
+        }
+
+        try reopenLive()
+        currentDay = newDay
+
+        let sealed = try Partition.seal(archivePath: archivePath, day: day)
+        try recordInCatalog(sealed)
+        stats.rotations += 1
+        return sealed
+    }
+
+    private func reopenLive() throws {
+        db = try SQLiteConnection(path: paths.liveDatabase)
+        try Schema.configureWriter(db)
+        try Schema.createDayPartition(db)
+        try Self.attach(db, path: paths.metaDatabase, alias: "meta", create: Schema.createMeta)
+        try Self.attach(db, path: paths.rollupDatabase, alias: "roll", create: Schema.createRollup)
+        try Self.attach(db, path: paths.pcapDatabase, alias: "pcapx", create: Schema.createPcapIndex)
+        // The dimension caches map to ids in meta, which survived the rotation,
+        // so they stay valid. The iface cache likewise lives in roll.
+    }
+
+    private func recordInCatalog(_ archive: SealedArchive) throws {
+        let statement = try db.prepare("""
+            INSERT INTO meta.file_catalog
+              (path, day, first_ts, last_ts, bytes, conn_rows, dns_rows, ssl_rows,
+               sealed, created)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9)
+            ON CONFLICT(path) DO UPDATE SET
+              bytes = excluded.bytes, conn_rows = excluded.conn_rows,
+              dns_rows = excluded.dns_rows, ssl_rows = excluded.ssl_rows, sealed = 1
+            """)
+        statement.bind(1, archive.path)
+        statement.bind(2, archive.day)
+        statement.bind(3, archive.firstTimestamp)
+        statement.bind(4, archive.lastTimestamp)
+        statement.bind(5, archive.bytes)
+        statement.bind(6, archive.connRows)
+        statement.bind(7, archive.dnsRows)
+        statement.bind(8, archive.sslRows)
+        statement.bind(9, Timestamp(Date().timeIntervalSince1970 * 1_000_000))
+        try statement.run()
+    }
+
+    /// Runs a retention pass. Separate from rotation because the two have
+    /// different cadences: rotation is daily, retention is hourly, and a
+    /// long-running daemon should not couple them.
+    @discardableResult
+    public func runRetention(now: Timestamp) -> RetentionReport {
+        Retention.run(paths: paths, policy: policy, today: Time.utcDayString(now))
+    }
+
+    /// Every archive on disk, newest first, as recorded in the catalog.
+    public func archives() throws -> [(day: String, path: String, bytes: Int64, connRows: Int64)] {
+        var out: [(String, String, Int64, Int64)] = []
+        let statement = try db.prepare("""
+            SELECT day, path, bytes, conn_rows FROM meta.file_catalog ORDER BY day DESC
+            """)
+        while try statement.step() {
+            out.append((statement.text(0) ?? "", statement.text(1) ?? "",
+                        statement.int64(2), statement.int64(3)))
+        }
+        return out
     }
 
     /// Folds the WAL back into the main database. Deliberate rather than

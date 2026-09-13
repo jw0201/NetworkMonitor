@@ -32,6 +32,10 @@ func usage() -> Never {
       nmcapd --flows-file <f>      The same, over a saved capture. NO ROOT NEEDED.
       nmcapd --ingest <f> [dbdir]  Run a saved capture through the whole pipeline
                                    into a real database. NO ROOT NEEDED.
+      nmcapd --store-info <dir> [--run-retention]
+                                   Show partitions, sizes, the retention policy
+                                   and a projection. Deletes nothing unless
+                                   --run-retention is given.
       nmcapd --layout              Print the compiled-in struct layout and exit.
       nmcapd --help
     """)
@@ -76,6 +80,14 @@ case "--ingest":
         usage()
     }
     exit(await runIngest(path: file, databaseRoot: args.dropFirst(3).first))
+
+case "--store-info":
+    guard let dir = args.dropFirst(2).first else {
+        print("--store-info needs a store directory\n")
+        usage()
+    }
+    exit(await runStoreInfo(root: dir,
+                            applyRetention: args.contains("--run-retention")))
 
 case "--bench-flows":
     let flows = args.dropFirst(2).first.flatMap(Int.init) ?? 4_000

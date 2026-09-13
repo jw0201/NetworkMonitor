@@ -11,5 +11,6 @@ runDNSAnalyzerTests()
 runHostnameCacheTests()
 runStreamBufferTests()
 runTLSTests()
+await runRetentionTests()
 
 exit(NMTest.finish())
