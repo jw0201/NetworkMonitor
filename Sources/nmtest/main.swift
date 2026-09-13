@@ -9,5 +9,6 @@ runFlowTests()
 runDNSParserTests()
 runDNSAnalyzerTests()
 runHostnameCacheTests()
+runStreamBufferTests()
 
 exit(NMTest.finish())

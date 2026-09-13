@@ -167,6 +167,11 @@ public final class FlowTable {
     private var wheel: [Int32]
     private var wheelCursor: Int64 = 0
 
+    /// Called just before a slot is reused, so side tables keyed on the slot
+    /// can drop their entry. Without this the reassembly pool fills with
+    /// buffers belonging to flows that ended and then refuses new ones.
+    public var onSlotReleased: ((Int32) -> Void)?
+
     public private(set) var stats = FlowTableStats()
     public private(set) var interfaces = InterfaceTable()
 
@@ -381,6 +386,7 @@ public final class FlowTable {
     private func release(_ slot: Int32, _ entry: FlowEntry, _ reason: FlowEndReason,
                          _ finalize: (FlowEntry, FlowEndReason) -> Void) {
         finalize(entry, reason)
+        onSlotReleased?(slot)
         unlink(slot)
         index.removeValue(forKey: entry.key)
         entries[Int(slot)] = nil

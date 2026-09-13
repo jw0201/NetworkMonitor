@@ -47,6 +47,10 @@ public final class FlowEngine {
     /// consulted at flow creation.
     public let hostnames = HostnameCache()
 
+    /// In-order stream prefixes for analyzer-attached TCP flows. Bounded, and
+    /// only populated for flows an analyzer actually wants.
+    public let reassembly = ReassemblyPool()
+
     /// Incremented by the capture layer whenever packets are dropped.
     public var lossEpoch: UInt64 = 0
 
@@ -91,6 +95,9 @@ public final class FlowEngine {
 
     public init(table: FlowTable = FlowTable()) {
         self.table = table
+        table.onSlotReleased = { [weak self] slot in
+            self?.reassembly.release(slot: slot)
+        }
     }
 
     // MARK: - Packet path
@@ -284,16 +291,62 @@ public final class FlowEngine {
         guard let payload = try? reader.reader(at: l4.payloadOffset,
                                                count: l4.payloadLength) else { return }
 
+        // TCP analyzers see the cumulative in-order stream, not one segment:
+        // a ClientHello routinely spans two or three segments, and a parser
+        // handed a fragment would report every handshake as malformed.
+        var effectivePayload = payload
+        var hasGap = false
+        let isStream = l3.proto == TransportParser.tcp
+
+        if isStream {
+            // `rest` is already an UnsafeRawBufferPointer over the packet's
+            // remaining bytes, valid for the duration of this call.
+            let outcome = reassembly.accept(slot: slot, fromOriginator: fromOriginator,
+                                            sequence: l4.sequence, payload: payload.rest)
+            if case .gap(let missing) = outcome {
+                table.withEntry(slot) {
+                    $0.missedBytes += Int64(missing)
+                    $0.tcp.observeGap(fromOriginator: fromOriginator)
+                }
+            }
+            guard let direction = reassembly.direction(slot: slot,
+                                                       fromOriginator: fromOriginator),
+                  !direction.bytes.isEmpty else { return }
+            hasGap = direction.hasGap
+            // The reader below borrows the pool's storage, which stays alive
+            // for the duration of this call.
+            return direction.bytes.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Void in
+                guard let cumulative = ByteReader(raw) else { return }
+                dispatch(analyzer: analyzer, slot: slot, entry: entry, key: key,
+                         context: context, l3: l3, fromOriginator: fromOriginator,
+                         sourcePort: sourcePort, destinationPort: destinationPort,
+                         payload: cumulative, isStream: true, hasGap: hasGap)
+            }
+        }
+
+        dispatch(analyzer: analyzer, slot: slot, entry: entry, key: key,
+                 context: context, l3: l3, fromOriginator: fromOriginator,
+                 sourcePort: sourcePort, destinationPort: destinationPort,
+                 payload: payload, isStream: false, hasGap: false)
+    }
+
+    private func dispatch(analyzer: PacketAnalyzer, slot: Int32, entry: FlowEntry,
+                          key: FlowKey, context: PacketContext, l3: L3Info,
+                          fromOriginator: Bool, sourcePort: UInt16,
+                          destinationPort: UInt16, payload: ByteReader,
+                          isStream: Bool, hasGap: Bool) {
         let analyzerContext = AnalyzerContext(
             flowUID: entry.uid, key: key, packet: context,
             fromOriginator: fromOriginator,
             sourceAddress: l3.source, sourcePort: sourcePort,
             destinationAddress: l3.destination, destinationPort: destinationPort,
-            proto: l3.proto)
+            proto: l3.proto,
+            isStream: isStream, streamHasGap: hasGap)
+        let effectivePayload = payload
 
         stats.analyzerInvocations += 1
         var service: String?
-        let verdict = analyzer.analyze(analyzerContext, payload: payload) { output in
+        let verdict = analyzer.analyze(analyzerContext, payload: effectivePayload) { output in
             if case .service(let name) = output { service = name; return }
             self.handle(output, now: context.timestamp)
         }
@@ -342,6 +395,7 @@ public final class FlowEngine {
         table.drain { entry, reason in self.emit(entry, reason) }
         flushEvictionAggregates()
         detachedFlows.removeAll(keepingCapacity: true)
+        reassembly.removeAll()
     }
 
     /// Drives analyzer maintenance without a packet to trigger it, so an

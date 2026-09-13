@@ -56,11 +56,21 @@ public struct AnalyzerContext {
     public let destinationPort: UInt16
     public let proto: UInt8
 
+    /// True when the payload is the cumulative in-order stream rather than a
+    /// single datagram. A stream analyzer will be called repeatedly with a
+    /// growing prefix and must be restartable.
+    public let isStream: Bool
+    /// The stream lost in-order continuity before this point. Anything parsed
+    /// past a gap is guesswork, so analyzers stop rather than splice.
+    public let streamHasGap: Bool
+
     public init(flowUID: FlowID, key: FlowKey, packet: PacketContext,
                 fromOriginator: Bool,
                 sourceAddress: IPAddress, sourcePort: UInt16,
                 destinationAddress: IPAddress, destinationPort: UInt16,
-                proto: UInt8) {
+                proto: UInt8,
+                isStream: Bool = false,
+                streamHasGap: Bool = false) {
         self.flowUID = flowUID
         self.key = key
         self.packet = packet
@@ -70,6 +80,8 @@ public struct AnalyzerContext {
         self.destinationAddress = destinationAddress
         self.destinationPort = destinationPort
         self.proto = proto
+        self.isStream = isStream
+        self.streamHasGap = streamHasGap
     }
 }
 
