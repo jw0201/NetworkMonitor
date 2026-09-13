@@ -9,6 +9,40 @@ configurable retention, a live SwiftUI dashboard, and raw record / packet
 browsing. Early stage — the capture, flow-tracking and storage layers exist and
 are verified; the analyzers, IPC and UI do not yet.
 
+## Live verification (first real install)
+
+The daemon ran for ~45 minutes of ordinary use. What that produced, and what it
+found:
+
+```
+conn 2,157 · dns 1,177 · ssl 356        service: root, CPU 0.8%, RSS 9.8 MB
+states: SF 1619 · S0 342 · OTH 91 · RSTO 59 · RSTR 20 · REJ 2
+hostnames: api.github.com ← gh,  search.pstatic.net ← Google Chrome Helper
+delegation: mDNSResponder ← Aside Helper, 120 flows
+JA4: t13d1312h2_f57a46bbacb6_…  (distinct per client, as intended)
+```
+
+Two findings worth keeping:
+
+- **ECH is 229 of 356 TLS sessions.** Encrypted Client Hello is not a rare case
+  to handle defensively — it is the *majority* path here. The decision not to
+  assert an outer SNI as the destination is load-bearing, not a nicety.
+- **The WAL grew to 48 MB against an 8 KB database.** `wal_autocheckpoint` is
+  off by design, but nothing was calling one on a schedule. Fixed; see the
+  Storage section.
+
+Re-verify with:
+
+```bash
+launchctl print system/com.narusec.networkmonitor.nmcapd | grep state
+sqlite3 "file:/Library/Application Support/NetworkMonitor/db/live.db?mode=ro" \
+  "SELECT count(*) FROM conn"
+```
+
+Reading the store directly requires membership of `_networkmonitor`, which
+`Tools/install.sh` grants to `$SUDO_USER`. **Group membership does not apply to
+already-running shells** — a new terminal, or `su - $USER`, is needed.
+
 ## Documentation map
 
 | Document | Audience | Purpose |
@@ -323,6 +357,21 @@ deliberate and should not be "simplified away":
   the real destination. The UI must say "encrypted" / flag `sniIsOuter` rather
   than showing a confident wrong hostname.
 
+## WAL checkpointing
+
+`wal_autocheckpoint` is **off**, so a checkpoint cannot land mid-batch — which
+means something has to call one on a schedule. The daemon does, every 30s via
+`checkpointIfNeeded`.
+
+Two facts that caused a real bug:
+
+- **PASSIVE does not shrink the WAL file.** It moves content into the database
+  and lets the space be *reused*; it does not return it. Only TRUNCATE does, and
+  TRUNCATE blocks until readers clear. The daemon tries PASSIVE first and falls
+  back to TRUNCATE only when the file is still oversized.
+- **`journal_size_limit` is the size the WAL is trimmed *back to*, not a ceiling
+  on growth.** Set above the working size it never fires. It is 16 MB.
+
 ## Retention and partitioning
 
 Retention is `unlink()` on a day file. That is the reason the store is split at
@@ -418,7 +467,32 @@ Swift 6 language mode on every target.
 | TLS analysis + JA4/JA3 | JA4_b pinned to the published reference value |
 | XPC, retention/seal, SwiftUI app, install scripts | Not started |
 
-Two probes from the plan remain unverified and both need root:
+Two probes from the plan remain unverified:
 **P4** (does lo0 really double-tap as assumed) and **P5** (does `pth_epid` on
 DNS packets name the *requesting* application — the pid-keyed DNS cache degrades
-gracefully to wildcard if not).
+gracefully to wildcard if not). Both are now answerable against the live
+install rather than needing a special capture.
+
+## Installed layout
+
+```
+/usr/local/libexec/nmcapd                     root:wheel 0755   ← NOT in the .app
+/Library/LaunchDaemons/com.narusec.…plist      root:wheel 0644
+/Applications/NetworkMonitor.app
+/Library/Application Support/NetworkMonitor/
+  peers.plist                                 both cdhashes, written at install
+  db/            0770 root:_networkmonitor    ← 0770, see DECISIONS I1
+  pcap/ export/
+/var/log/networkmonitor/nmcapd.err
+```
+
+`sudo Tools/install.sh` / `sudo Tools/uninstall.sh [--purge-data]`. Uninstall
+keeps captured data unless `--purge-data`, and asks even then.
+
+**The daemon binary must not live inside the .app.** `/Applications` is
+`root:admin 0775` — group-writable by non-root — and launchd refuses to run a
+daemon whose binary or plist is writable by anyone but root. The error is
+painful to diagnose.
+
+**`ProcessType` is `Adaptive`, never `Background`.** Background has its disk I/O
+throttled, which for a capture daemon writing a log is exactly backwards.

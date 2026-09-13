@@ -294,6 +294,11 @@ With Encrypted Client Hello the visible SNI is the public outer name. The record
 sets `sniIsOuter` and the analyzer deliberately does **not** offer the name as
 the connection's hostname. Blank beats confidently wrong.
 
+**Measured on the first live install: 229 of 356 TLS sessions used ECH.** This
+is not a rare case to handle defensively — it is the majority path on a current
+macOS with a current browser. Anything that treats the visible SNI as the
+destination is wrong most of the time.
+
 ### A11. X.509 goes through `SecCertificate`
 
 Hand-writing a DER parser inside a root process consuming attacker-supplied
@@ -401,7 +406,26 @@ refuses to `COMMIT` with error 5 — an error that surfaces nowhere near the
 statement that caused it. `Statement.step()` resets automatically to make the
 whole class of bug impossible rather than a thing to remember.
 
-### S10. The writer's current day comes from the data, not the clock
+### S10. The WAL needs its own checkpoint schedule
+
+`wal_autocheckpoint` is off so a checkpoint cannot land in the middle of a write
+batch. Nothing was then calling one on a schedule, so on the first live install
+45 minutes of ordinary browsing produced an **8 KB database and a 48 MB WAL**.
+
+Two things had to change, and the first was a misunderstanding:
+
+- **PASSIVE does not shrink the WAL file.** It moves content into the database
+  and allows the space to be reused; it does not return it. Only TRUNCATE does,
+  and TRUNCATE blocks until readers are clear. The daemon tries PASSIVE first
+  and falls back to TRUNCATE only when the file is still oversized.
+- **`journal_size_limit` is the size the WAL is trimmed back to after a
+  checkpoint, not a ceiling on growth.** It was 64 MB — above the working size,
+  so it never fired. Now 16 MB.
+
+> Found by a test written against observed behaviour rather than intended
+> behaviour: it failed on its first run and named the bug.
+
+### S11. The writer's current day comes from the data, not the clock
 
 Taking it from the wall clock at startup meant a writer replaying an older
 capture rotated on its very first write, archiving an empty partition and putting
