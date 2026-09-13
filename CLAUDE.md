@@ -552,3 +552,18 @@ painful to diagnose.
 
 **`ProcessType` is `Adaptive`, never `Background`.** Background has its disk I/O
 throttled, which for a capture daemon writing a log is exactly backwards.
+
+**`launchctl bootout` is asynchronous.** It returns once launchd accepts the
+request, not once the job is gone, and this daemon takes real time to exit —
+stop capture, flush pending rows, checkpoint the WAL, finalise open flows, with
+`ExitTimeOut` at 30. Bootstrapping a label that is still registered fails with
+
+```
+Bootstrap failed: 5: Input/output error
+```
+
+which names neither the cause nor the cure, and under `set -e` it is the last
+line the installer prints. Always poll `launchctl print` until the label is gone
+before `bootstrap`. `launchctl enable` belongs **before** `bootstrap` too: a
+label left disabled in the override database is the other source of the same
+EIO, and enabling it afterwards is too late to have helped.

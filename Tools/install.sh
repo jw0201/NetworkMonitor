@@ -178,15 +178,46 @@ echo
 echo "Service"
 if launchctl print "system/$DAEMON_ID" >/dev/null 2>&1; then
     launchctl bootout "system/$DAEMON_ID" 2>/dev/null || true
-    say "stopped the previous instance"
+    # bootout returns once launchd has accepted the request, not once the job
+    # is gone, and this daemon takes real time to exit: it stops capture,
+    # flushes pending rows, checkpoints the WAL and finalises open flows
+    # (ExitTimeOut is 30). Bootstrapping a label that is still registered fails
+    # with "Bootstrap failed: 5: Input/output error", which names neither the
+    # cause nor the cure. uninstall.sh has always waited here; this did not.
+    STOPPED=false
+    for _ in $(seq 1 70); do
+        launchctl print "system/$DAEMON_ID" >/dev/null 2>&1 || { STOPPED=true; break; }
+        sleep 0.5
+    done
+    if [ "$STOPPED" = true ]; then
+        say "stopped the previous instance"
+    else
+        fail "the previous instance is still registered after 35s.
+  Stop it by hand and run this again:
+    sudo launchctl bootout system/$DAEMON_ID"
+    fi
 fi
 
 install -o root -g wheel -m 0644 \
     Tools/Resources/com.narusec.networkmonitor.nmcapd.plist "$PLIST"
 plutil -lint "$PLIST" >/dev/null || fail "the LaunchDaemon plist is malformed"
 
-launchctl bootstrap system "$PLIST"
+# enable before bootstrap, not after: a label left disabled in launchd's
+# override database is the other thing that makes bootstrap fail with EIO, and
+# enabling it afterwards is too late to have helped.
 launchctl enable "system/$DAEMON_ID" 2>/dev/null || true
+
+if ! BOOTSTRAP_ERR=$(launchctl bootstrap system "$PLIST" 2>&1); then
+    case "$BOOTSTRAP_ERR" in
+        *"Input/output error"*)
+            fail "launchd refused the job: $BOOTSTRAP_ERR
+  This almost always means the label is still registered. Check and clear it:
+    sudo launchctl print system/$DAEMON_ID
+    sudo launchctl bootout system/$DAEMON_ID" ;;
+        *)
+            fail "launchd refused the job: $BOOTSTRAP_ERR" ;;
+    esac
+fi
 launchctl kickstart -p "system/$DAEMON_ID" >/dev/null 2>&1 || true
 
 # Poll rather than assume: bootstrap returning 0 means launchd accepted the
