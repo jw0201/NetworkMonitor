@@ -48,6 +48,7 @@ func runIngest(path: String, databaseRoot: String?) async -> Int32 {
 
     let engine = FlowEngine()
     engine.analyzers.register(DNSAnalyzer())
+    engine.analyzers.register(TLSAnalyzer())
 
     // Records are accumulated and written in batches. Writing each record as it
     // is produced would put a transaction on the packet path, which is the one
@@ -55,6 +56,7 @@ func runIngest(path: String, databaseRoot: String?) async -> Int32 {
     let collector = RecordCollector()
     engine.onConnectionRecord = { record, _ in collector.batch.conns.append(record) }
     engine.onDNSRecord = { record in collector.batch.dns.append(record) }
+    engine.onSSLRecord = { record in collector.batch.ssl.append(record) }
 
     let started = DispatchTime.now().uptimeNanoseconds
     var written = 0

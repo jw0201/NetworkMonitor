@@ -41,6 +41,7 @@ private struct FlowPrinter {
     var rows: [ConnRecord] = []
     var reasons: [FlowEndReason] = []
     var dnsRows: [DNSRecord] = []
+    var sslRows: [SSLRecord] = []
 
     mutating func add(_ r: ConnRecord, _ reason: FlowEndReason) {
         rows.append(r)
@@ -48,6 +49,7 @@ private struct FlowPrinter {
     }
 
     mutating func addDNS(_ r: DNSRecord) { dnsRows.append(r) }
+    mutating func addSSL(_ r: SSLRecord) { sslRows.append(r) }
 
     func printTable(limit: Int) {
         print("")
@@ -148,6 +150,59 @@ private struct FlowPrinter {
         case 28: return "AAAA"
         case 65: return "HTTPS"
         default: return "TYPE\(type)"
+        }
+    }
+
+    func printTLS(limit: Int) {
+        guard !sslRows.isEmpty else { return }
+        print("\nTLS")
+        print(String(repeating: "-", count: 134))
+        print(col("ts", 13) + col("server name", 34) + col("version", 9)
+              + col("alpn", 9) + col("JA4", 38) + "certificate")
+        print(String(repeating: "-", count: 134))
+
+        for r in sslRows.prefix(limit) {
+            var name = r.sni ?? "-"
+            // With ECH the visible name is the public outer one. Saying so is
+            // the difference between a hint and a wrong answer.
+            if r.sniIsOuter { name = "(ECH) " + name }
+
+            let certificate: String
+            if r.certsEncrypted {
+                certificate = "encrypted (TLS 1.3)"
+            } else if let subject = r.subject {
+                certificate = subject
+            } else if !r.established {
+                certificate = "no server response"
+            } else {
+                certificate = "-"
+            }
+
+            print(col(shortTime(r.ts), 13) + col(name, 34)
+                  + col(r.versionName, 9) + col(r.alpn ?? "-", 9)
+                  + col(r.ja4 ?? "-", 38) + certificate)
+        }
+        if sslRows.count > limit { print("  ... \(sslRows.count - limit) more") }
+
+        let ech = sslRows.filter(\.sniIsOuter).count
+        let encrypted = sslRows.filter(\.certsEncrypted).count
+        let unanswered = sslRows.filter { !$0.established }.count
+        var notes: [String] = []
+        if encrypted > 0 {
+            notes.append("\(encrypted) session\(encrypted == 1 ? "" : "s") negotiated TLS 1.3, "
+                         + "whose certificates are encrypted and cannot be read passively.")
+        }
+        if ech > 0 {
+            notes.append("\(ech) used Encrypted Client Hello -- the name shown is the public "
+                         + "outer name, not the real destination.")
+        }
+        if unanswered > 0 {
+            notes.append("\(unanswered) handshake\(unanswered == 1 ? "" : "s") got no server "
+                         + "response.")
+        }
+        if !notes.isEmpty {
+            print("")
+            for note in notes { print("  \(note)") }
         }
     }
 
@@ -271,9 +326,11 @@ func runFlowsFromFile(path: String, limit: Int) -> Int32 {
 
     let engine = FlowEngine()
     engine.analyzers.register(DNSAnalyzer())
+    engine.analyzers.register(TLSAnalyzer())
     var printer = FlowPrinter()
     engine.onConnectionRecord = { record, reason in printer.add(record, reason) }
     engine.onDNSRecord = { record in printer.addDNS(record) }
+    engine.onSSLRecord = { record in printer.addSSL(record) }
 
     let result = replay.replayAll { meta, record, timestamp in
         var l3 = (try? record.reader(at: meta.l3Offset,
@@ -286,6 +343,7 @@ func runFlowsFromFile(path: String, limit: Int) -> Int32 {
     print("packets    \(result.decoded) decoded, \(result.decodeFailures) failed")
     printer.printTable(limit: limit)
     printer.printDNS(limit: limit)
+    printer.printTLS(limit: limit)
     printer.printSummary(engine)
     return 0
 }
@@ -322,9 +380,11 @@ func runFlowsLive(seconds: Double, limit: Int) -> Int32 {
 
     let engine = FlowEngine()
     engine.analyzers.register(DNSAnalyzer())
+    engine.analyzers.register(TLSAnalyzer())
     var printer = FlowPrinter()
     engine.onConnectionRecord = { record, reason in printer.add(record, reason) }
     engine.onDNSRecord = { record in printer.addDNS(record) }
+    engine.onSSLRecord = { record in printer.addSSL(record) }
 
     let deadline = Date().addingTimeInterval(seconds)
     var lastStats = CaptureStats()
@@ -350,6 +410,7 @@ func runFlowsLive(seconds: Double, limit: Int) -> Int32 {
     }
     printer.printTable(limit: limit)
     printer.printDNS(limit: limit)
+    printer.printTLS(limit: limit)
     printer.printSummary(engine)
     return 0
 }

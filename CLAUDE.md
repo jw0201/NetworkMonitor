@@ -76,7 +76,7 @@ CPktap          C shim: hand-declared struct pktap_header + Apple's real pcap he
       ├ NMCapture   pcap handle, PKTAP decode, pcap file read/write   [root-only surface]
       ├ NMFlow      L3/L4 parsers, FlowKey, FlowTable, TCPStateMachine,
       │             FlowEngine, PacketAnalyzer protocol, HostnameCache
-      │   └ NMAnalyzers   DNS parsing and analysis (application layer)
+      │   └ NMAnalyzers   DNS and TLS parsing and analysis
       ├ NMStore     SQLite wrapper, schema, StoreWriter actor
       └ NMSource    RecordSource protocol + SyntheticSource
 nmcapd          CLI that wires them together
@@ -198,6 +198,49 @@ a matching response, and pairing it manufactures phantom "unanswered" rows.
 CNAME chains resolve back to the name originally asked for. Caching the final
 CDN edge-node name would be technically true and useless.
 
+## TLS specifics
+
+Three facts the UI must be built around, all recorded explicitly rather than
+left blank:
+
+- **TLS 1.3 encrypts the Certificate message.** Certificate fields are
+  *unavailable*, not unknown — `certsEncrypted` says which. Under 1.2 they are
+  plaintext and get parsed.
+- **Under TLS 1.3 the server's ALPN is in `EncryptedExtensions`** and is not
+  visible. Reporting the client's offer as negotiated would be a guess.
+- **ECH means the visible SNI is the public outer name.** `sniIsOuter` is set
+  and the name is deliberately *not* asserted as the connection's hostname.
+
+Hostname precedence is `HostnameSource.strength`: SNI > HTTP Host > per-process
+DNS > wildcard DNS > PTR. A weaker source never overwrites a stronger one.
+
+**A malformed individual extension is skipped, not fatal to the ClientHello.**
+Discarding the whole message over one odd entry would throw away the SNI and the
+fingerprint — which is exactly what an attacker wanting to stay unlogged would
+arrange. The extension's type is still recorded so the fingerprint reflects it.
+
+X.509 goes through `SecCertificate`. Do not hand-write a DER parser here.
+
+JA4 is primary because it sorts cipher and extension lists before hashing, so it
+survives the extension shuffling Chrome/BoringSSL do deliberately — the thing
+that made JA3 useless for modern browsers. JA3 is kept as a threat-intel join
+key. `ja4Raw` is stored because two disagreeing digests tell you nothing about
+which field diverged.
+
+## Reassembly
+
+Deliberately minimal: first K bytes per direction, in order, with an explicit
+gap flag. No out-of-order queues. Overlaps resolve to **first-seen** bytes,
+which is what macOS itself does — matching the endpoint's view is what closes
+the divergence TCP evasion attacks exploit.
+
+Sequence comparison is a signed difference, never `<`/`>`: numbers wrap at 2^32
+and the naive comparison reads a wrap as a 4 GB gap.
+
+Buffers live in `ReassemblyPool` keyed by flow slot, not in `FlowEntry` (262k
+entries × 8 KB would be 2 GB). `FlowTable.onSlotReleased` must stay wired or the
+pool fills with dead flows' buffers and refuses new ones.
+
 ## Honesty invariants
 
 The product's value depends on not presenting guesses as facts. These are
@@ -289,7 +332,8 @@ Swift 6 language mode on every target.
 | Storage | Benchmarked to 60k rows/s; schema and query plans measured |
 | DNS parsing + analysis | Fuzzed in release; compression attacks covered |
 | Hostname enrichment | Per-process cache verified against the shared-CDN case |
-| TLS analyzer | Not started |
+| TCP reassembly | Overlap, gap and sequence-wrap cases covered |
+| TLS analysis + JA4/JA3 | JA4_b pinned to the published reference value |
 | XPC, retention/seal, SwiftUI app, install scripts | Not started |
 
 Two probes from the plan remain unverified and both need root:

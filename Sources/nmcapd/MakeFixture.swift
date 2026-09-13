@@ -58,14 +58,33 @@ func makeFixture(path: String, packets: Int) -> Int32 {
             try writeDNS(writer, at: &timestamp, payload: answer, outbound: false,
                          clientPort: clientPort, process: host.process, pid: host.pid)
 
-            // The connection that follows, which enrichment should label.
+            // The connection that follows, which enrichment should label,
+            // carrying a real TLS handshake so the analyzer has something to
+            // read. The last host uses ECH, so the "outer name" path is
+            // exercised by a plain fixture rather than only by tests.
+            let tlsPort = UInt16(49000 + index)
             for (flags, outbound) in [(TCPFlags([.syn]), true),
-                                      (TCPFlags([.syn, .ack]), false),
-                                      (TCPFlags([.psh, .ack]), true)] {
-                try writeTCP(writer, at: &timestamp, host: host,
-                             clientPort: UInt16(49000 + index), flags: flags,
-                             outbound: outbound)
+                                      (TCPFlags([.syn, .ack]), false)] {
+                try writeTCP(writer, at: &timestamp, host: host, clientPort: tlsPort,
+                             flags: flags, outbound: outbound, payload: [])
             }
+
+            var hello = TLSClientHelloBuilder()
+            hello.serverName = host.name
+            hello.encryptedClientHello = (index == resolvedHosts.count - 1)
+            // Split across records, which is how a real one usually arrives.
+            hello.recordSplits = 2
+            try writeTCP(writer, at: &timestamp, host: host, clientPort: tlsPort,
+                         flags: [.psh, .ack], outbound: true, payload: hello.build())
+
+            var serverHello = TLSServerHelloBuilder()
+            // One host negotiates TLS 1.2, so the certificate path differs
+            // visibly from the encrypted 1.3 case.
+            serverHello.selectedVersion = index == 0 ? nil : 0x0304
+            serverHello.cipherSuite = index == 0 ? 0xC02F : 0x1301
+            serverHello.alpn = index == 0 ? "h2" : nil
+            try writeTCP(writer, at: &timestamp, host: host, clientPort: tlsPort,
+                         flags: [.psh, .ack], outbound: false, payload: serverHello.build())
         }
 
         for i in 0..<packets {
@@ -164,17 +183,21 @@ private func writeDNS(_ writer: PcapFileWriter, at timestamp: inout Double,
 
 private func writeTCP(_ writer: PcapFileWriter, at timestamp: inout Double,
                       host: (name: String, address: IPAddress, process: String, pid: Int32),
-                      clientPort: UInt16, flags: TCPFlags, outbound: Bool) throws {
+                      clientPort: UInt16, flags: TCPFlags, outbound: Bool,
+                      payload: [UInt8]) throws {
     let client = IPAddress("192.168.0.31")!
-    let payload: [UInt8] = flags.contains(.psh)
-        ? [UInt8](repeating: 0x41, count: 517) : []
+    // Sequence numbers must advance per direction, or the reassembler reads
+    // every segment as a retransmission of the first and the handshake never
+    // accumulates.
+    let sequence = nextSequence(clientPort: clientPort, outbound: outbound,
+                                length: payload.count)
     let ip = outbound
         ? PacketFixture.ipv4TCP(.init(source: client, sourcePort: clientPort,
                                       destination: host.address, destinationPort: 443,
-                                      flags: flags, payload: payload))
+                                      flags: flags, sequence: sequence, payload: payload))
         : PacketFixture.ipv4TCP(.init(source: host.address, sourcePort: 443,
                                       destination: client, destinationPort: clientPort,
-                                      flags: flags, payload: payload))
+                                      flags: flags, sequence: sequence, payload: payload))
     try write(writer, at: &timestamp, ip: ip, outbound: outbound,
               process: host.process, pid: host.pid)
 }
@@ -201,4 +224,14 @@ private func write(_ writer: PcapFileWriter, at timestamp: inout Double,
         try writer.write(timestamp: timestamp, originalLength: record.count, bytes: $0)
     }
     timestamp += 0.005
+}
+
+/// Per-direction sequence counters for the fixture's TCP streams.
+private nonisolated(unsafe) var sequenceCounters: [String: UInt32] = [:]
+
+private func nextSequence(clientPort: UInt16, outbound: Bool, length: Int) -> UInt32 {
+    let key = "\(clientPort)-\(outbound)"
+    let current = sequenceCounters[key] ?? 1000
+    sequenceCounters[key] = current &+ UInt32(length)
+    return current
 }
