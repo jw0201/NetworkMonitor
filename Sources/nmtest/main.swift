@@ -14,5 +14,6 @@ runTLSTests()
 await runRetentionTests()
 await runIPCTests()
 await runStoreReaderTests()
+runFilterParserTests()
 
 exit(NMTest.finish())

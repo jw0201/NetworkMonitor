@@ -39,9 +39,9 @@ struct RootView: View {
                 switch screen {
                 case .overview: OverviewView()
                 case .connections: ConnectionsView()
-                case .dns: PlaceholderView(screen: .dns)
-                case .tls: PlaceholderView(screen: .tls)
-                case .browser: PlaceholderView(screen: .browser)
+                case .dns: DNSView()
+                case .tls: TLSView()
+                case .browser: BrowserView()
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -80,14 +80,3 @@ struct LinkStatusBar: View {
     }
 }
 
-struct PlaceholderView: View {
-    let screen: Screen
-
-    var body: some View {
-        ContentUnavailableView {
-            Label(screen.rawValue, systemImage: screen.symbol)
-        } description: {
-            Text("Not built yet.")
-        }
-    }
-}

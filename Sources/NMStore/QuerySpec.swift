@@ -112,6 +112,27 @@ public struct ConnRow: Sendable, Identifiable {
     public var day: String?
 
     public var totalBytes: Int64 { bytesIn + bytesOut }
+
+    public init(id: Int64, uid: UInt64, ts: Timestamp, durationUs: Int64?,
+                proto: UInt8, localAddress: String, localPort: UInt16,
+                remoteAddress: String, remotePort: UInt16,
+                hostname: String?, hostnameSource: Int, hostnameAmbiguous: Bool,
+                service: String?, state: String, history: String,
+                bytesOut: Int64, bytesIn: Int64, packetsOut: Int64, packetsIn: Int64,
+                processName: String?, proxyName: String?, lossSuspected: Bool,
+                day: String?) {
+        self.id = id; self.uid = uid; self.ts = ts; self.durationUs = durationUs
+        self.proto = proto
+        self.localAddress = localAddress; self.localPort = localPort
+        self.remoteAddress = remoteAddress; self.remotePort = remotePort
+        self.hostname = hostname; self.hostnameSource = hostnameSource
+        self.hostnameAmbiguous = hostnameAmbiguous
+        self.service = service; self.state = state; self.history = history
+        self.bytesOut = bytesOut; self.bytesIn = bytesIn
+        self.packetsOut = packetsOut; self.packetsIn = packetsIn
+        self.processName = processName; self.proxyName = proxyName
+        self.lossSuspected = lossSuspected; self.day = day
+    }
 }
 
 public struct DNSRow: Sendable, Identifiable {
@@ -153,6 +174,14 @@ public struct DNSRow: Sendable, Identifiable {
     /// A lookup that failed or was never answered. Worth surfacing: it is what
     /// a blocked resolver, a captive portal or a dropped packet looks like.
     public var isProblem: Bool { rejected || rcode != 0 }
+
+    public init(id: Int64, ts: Timestamp, query: String, qtype: UInt16,
+                rcode: UInt16, rttUs: Int64?, answers: [String], rejected: Bool,
+                processName: String?, day: String?) {
+        self.id = id; self.ts = ts; self.query = query; self.qtype = qtype
+        self.rcode = rcode; self.rttUs = rttUs; self.answers = answers
+        self.rejected = rejected; self.processName = processName; self.day = day
+    }
 }
 
 public struct SSLRow: Sendable, Identifiable {
@@ -188,6 +217,20 @@ public struct SSLRow: Sendable, Identifiable {
 
     /// Anything below TLS 1.2 is deprecated and worth flagging.
     public var isWeakVersion: Bool { version != 0 && version < 0x0303 }
+
+    public init(id: Int64, ts: Timestamp, serverAddress: String, serverPort: UInt16,
+                sni: String?, sniIsOuter: Bool, version: UInt16, cipher: UInt16,
+                alpn: String?, ja4: String?, ja3: String?, certsEncrypted: Bool,
+                subject: String?, issuer: String?, notAfter: Timestamp?,
+                established: Bool, processName: String?, day: String?) {
+        self.id = id; self.ts = ts
+        self.serverAddress = serverAddress; self.serverPort = serverPort
+        self.sni = sni; self.sniIsOuter = sniIsOuter
+        self.version = version; self.cipher = cipher; self.alpn = alpn
+        self.ja4 = ja4; self.ja3 = ja3; self.certsEncrypted = certsEncrypted
+        self.subject = subject; self.issuer = issuer; self.notAfter = notAfter
+        self.established = established; self.processName = processName; self.day = day
+    }
 }
 
 public struct Page<Row: Sendable>: Sendable {
