@@ -41,6 +41,11 @@ let package = Package(
             swiftSettings: strict
         ),
 
+        // Flow tracking. The L3/L4 parsers live here rather than in an
+        // analyzer module because building a flow key requires them -- putting
+        // them above NMFlow would make the dependency circular.
+        .target(name: "NMFlow", dependencies: ["NMCore"], swiftSettings: strict),
+
         // Storage: schema, the single-writer actor, rollups, retention.
         .target(name: "NMStore", dependencies: ["NMCore"], swiftSettings: strict),
 
@@ -54,7 +59,7 @@ let package = Package(
         .target(name: "NMTestKit", swiftSettings: strict),
         .executableTarget(
             name: "nmtest",
-            dependencies: ["NMTestKit", "NMCore", "NMCapture", "NMSource", "NMStore"],
+            dependencies: ["NMTestKit", "NMCore", "NMCapture", "NMFlow", "NMSource", "NMStore"],
             swiftSettings: strict
         ),
     ]

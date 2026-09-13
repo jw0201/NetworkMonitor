@@ -5,5 +5,6 @@ runByteReaderTests()
 runIPAddressTests()
 runPktapDecoderTests()
 runPcapRoundTripTests()
+runFlowTests()
 
 exit(NMTest.finish())
