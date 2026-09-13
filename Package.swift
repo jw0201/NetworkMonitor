@@ -9,6 +9,7 @@ let package = Package(
     name: "NetworkMonitor",
     platforms: [.macOS(.v14)],
     products: [
+        .executable(name: "nmcapd", targets: ["nmcapd"]),
         .executable(name: "nmtest", targets: ["nmtest"]),
     ],
     targets: [
@@ -52,6 +53,12 @@ let package = Package(
         // Record producers. SyntheticSource lets the whole stack above the
         // parser be built and benchmarked without root and without pcap.
         .target(name: "NMSource", dependencies: ["NMCore"], swiftSettings: strict),
+
+        .executableTarget(
+            name: "nmcapd",
+            dependencies: ["NMCapture", "NMCore", "NMFlow", "NMSource", "NMStore"],
+            swiftSettings: strict
+        ),
 
         // Tests are an executable, not a .testTarget: neither XCTest nor
         // swift-testing ships with the Command Line Tools, so `swift test`
