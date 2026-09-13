@@ -97,6 +97,23 @@ public enum HostnameSource: Int, Sendable {
     case reversePTR = 5
 
     public var isHighConfidence: Bool { self == .tlsSNI || self == .dnsPerProcess }
+
+    /// How much a source is trusted, higher being better. Used to decide
+    /// whether a newly learned name should replace one already on the flow.
+    ///
+    /// SNI outranks the DNS cache because it is what the client literally asked
+    /// the server for on this connection, rather than an inference from a
+    /// lookup that happened earlier and might have been someone else's.
+    public var strength: Int {
+        switch self {
+        case .none: return 0
+        case .reversePTR: return 1
+        case .dnsWildcard: return 2
+        case .dnsPerProcess: return 3
+        case .httpHost: return 4
+        case .tlsSNI: return 5
+        }
+    }
 }
 
 /// Process and binary identity. Interned into a dimension table so conn/dns/ssl

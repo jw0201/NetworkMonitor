@@ -347,8 +347,22 @@ public final class FlowEngine {
         stats.analyzerInvocations += 1
         var service: String?
         let verdict = analyzer.analyze(analyzerContext, payload: effectivePayload) { output in
-            if case .service(let name) = output { service = name; return }
-            self.handle(output, now: context.timestamp)
+            switch output {
+            case .service(let name):
+                service = name
+            case .hostname(let name, let source):
+                // Only replace a weaker attribution. SNI outranks the DNS
+                // cache; a wildcard cache hit must never overwrite an SNI.
+                self.table.withEntry(slot) { entry in
+                    if source.strength > entry.hostnameSource.strength {
+                        entry.hostname = name
+                        entry.hostnameSource = source
+                        entry.hostnameAmbiguous = false
+                    }
+                }
+            default:
+                self.handle(output, now: context.timestamp)
+            }
         }
 
         if let service {
@@ -387,6 +401,9 @@ public final class FlowEngine {
             hostnames.insert(address: address, name: name, ttl: ttl,
                              requestingPID: pid, now: now)
             onResolvedName?(address, name, ttl, pid)
+        case .hostname:
+            // Applied at the call site, which knows which flow it belongs to.
+            break
         }
     }
 

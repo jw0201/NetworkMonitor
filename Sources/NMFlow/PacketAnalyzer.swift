@@ -36,6 +36,9 @@ public enum AnalyzerOutput: Sendable {
     case service(String)
     /// A hostname learned for an address, offered to the enrichment cache.
     case resolvedName(address: IPAddress, name: String, ttl: UInt32, requestingPID: Int32)
+    /// A name learned for THIS flow specifically, with its provenance. Applied
+    /// to the flow directly, and only when it outranks what is already there.
+    case hostname(String, HostnameSource)
 }
 
 /// How a flow is routed to an analyzer.
