@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>NetworkMonitor</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.narusec.NetworkMonitor</string>
+    <key>CFBundleName</key>
+    <string>NetworkMonitor</string>
+    <key>CFBundleDisplayName</key>
+    <string>NetworkMonitor</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+
+    <!-- Without this, AppKit cannot determine the app's activation policy and
+         the process launches with no Dock icon, a degraded menu bar and
+         unreliable keyboard focus. It is the single most commonly omitted key
+         when a bundle is assembled by hand. -->
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+
+    <!-- CFBundleIconFile, NOT CFBundleIconName. The latter requires a compiled
+         asset catalog, and actool refuses to run without Xcode, so using it
+         silently yields a generic icon. -->
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>NetworkMonitor</string>
+</dict>
+</plist>

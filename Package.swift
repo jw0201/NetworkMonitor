@@ -11,6 +11,7 @@ let package = Package(
     products: [
         .executable(name: "nmcapd", targets: ["nmcapd"]),
         .executable(name: "nmtest", targets: ["nmtest"]),
+        .executable(name: "NetworkMonitorApp", targets: ["NetworkMonitorApp"]),
     ],
     targets: [
         // C shim: hand-declared pktap structures plus the real pcap headers.
@@ -64,6 +65,14 @@ let package = Package(
         .executableTarget(
             name: "nmcapd",
             dependencies: ["NMAnalyzers", "NMCapture", "NMCore", "NMFlow", "NMIPC", "NMSource", "NMStore"],
+            swiftSettings: strict
+        ),
+
+        // The SwiftUI app. Talks to the daemon over XPC and reads sealed
+        // archives directly; it never imports the capture or flow modules.
+        .executableTarget(
+            name: "NetworkMonitorApp",
+            dependencies: ["NMCore", "NMIPC", "NMStore"],
             swiftSettings: strict
         ),
 
