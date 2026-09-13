@@ -147,9 +147,22 @@ public final class LiveRing {
         lossEpoch &+= 1
     }
 
-    /// Clears the per-window process totals. Called when a snapshot window
-    /// rolls over so "top talkers in the last minute" means that, rather than
-    /// "since the daemon started".
+    /// Replaces the per-process totals wholesale.
+    ///
+    /// A live view has to include OPEN flows, which is most of the interesting
+    /// traffic: a machine holding a few long-lived connections would otherwise
+    /// show no per-process traffic at all until something disconnected.
+    /// Recomputing rather than accumulating also removes any chance of counting
+    /// a flow once while it is open and again when it closes.
+    public func setProcessTotals(_ totals: [ProcessTraffic]) {
+        processTotals.removeAll(keepingCapacity: true)
+        for entry in totals.prefix(maximumProcesses) {
+            processTotals[entry.execID] = entry
+        }
+    }
+
+    /// Clears the per-window totals, so "top talkers" means recently rather
+    /// than since the daemon started.
     public func rollProcessWindow() {
         processTotals.removeAll(keepingCapacity: true)
     }

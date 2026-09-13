@@ -188,6 +188,21 @@ public final class FlowTable {
 
     public var count: Int { index.count }
 
+    /// Visits currently-open flows, newest activity first, up to `limit`.
+    ///
+    /// For the live view only. Bounded because a saturated table holds a
+    /// quarter of a million flows and nobody is going to read them -- the point
+    /// is to show what is busy now, not to enumerate everything.
+    public func forEachActive(limit: Int, _ body: (FlowEntry) -> Void) {
+        var visited = 0
+        for (_, slot) in index {
+            guard visited < limit else { return }
+            guard let entry = self[slot] else { continue }
+            visited += 1
+            body(entry)
+        }
+    }
+
     /// Non-initial fragments have no L4 header, so they cannot be keyed to a
     /// flow. Counted rather than silently discarded: a sudden rise in fragments
     /// is itself a signal.

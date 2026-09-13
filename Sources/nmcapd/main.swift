@@ -32,6 +32,10 @@ func usage() -> Never {
       nmcapd --flows-file <f>      The same, over a saved capture. NO ROOT NEEDED.
       nmcapd --ingest <f> [dbdir]  Run a saved capture through the whole pipeline
                                    into a real database. NO ROOT NEEDED.
+      nmcapd --live [secs] [--capture]
+                                   Run the live pipeline and render it through
+                                   the real XPC path. Synthetic traffic unless
+                                   --capture is given (which needs root).
       nmcapd --store-info <dir> [--run-retention]
                                    Show partitions, sizes, the retention policy
                                    and a projection. Deletes nothing unless
@@ -80,6 +84,10 @@ case "--ingest":
         usage()
     }
     exit(await runIngest(path: file, databaseRoot: args.dropFirst(3).first))
+
+case "--live":
+    let secs = args.dropFirst(2).first.flatMap(Double.init) ?? 15
+    exit(await runLiveMode(seconds: secs, useCapture: args.contains("--capture")))
 
 case "--store-info":
     guard let dir = args.dropFirst(2).first else {
