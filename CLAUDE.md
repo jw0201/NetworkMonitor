@@ -47,7 +47,8 @@ Everything below runs **without root**:
 .build/debug/nmcapd --layout                     # compiled-in struct layout
 .build/debug/nmcapd --make-fixture /tmp/f.pcap 200
 .build/debug/nmcapd --replay /tmp/f.pcap         # decode, print pktap fields
-.build/debug/nmcapd --flows-file /tmp/f.pcap     # conn.log-style output
+.build/debug/nmcapd --flows-file /tmp/f.pcap     # conn.log-style output + DNS
+.build/debug/nmcapd --ingest /tmp/f.pcap         # whole pipeline into a real DB
 .build/release/nmcapd --bench-flows 4000 2000000 # flow engine throughput + flood bound
 .build/release/nmcapd --bench 50000 600          # storage: rows/s, bytes/row, dbstat, query plans
 tcpdump -r /tmp/f.pcap -k -n                     # Apple's decoder on the same file
@@ -73,7 +74,9 @@ everything and is what you want.
 CPktap          C shim: hand-declared struct pktap_header + Apple's real pcap headers
   └ NMCore      ByteReader, IPAddress/IPPrefix, records, Timestamp, Paths, Limits
       ├ NMCapture   pcap handle, PKTAP decode, pcap file read/write   [root-only surface]
-      ├ NMFlow      L3/L4 parsers, FlowKey, FlowTable, TCPStateMachine, FlowEngine
+      ├ NMFlow      L3/L4 parsers, FlowKey, FlowTable, TCPStateMachine,
+      │             FlowEngine, PacketAnalyzer protocol, HostnameCache
+      │   └ NMAnalyzers   DNS parsing and analysis (application layer)
       ├ NMStore     SQLite wrapper, schema, StoreWriter actor
       └ NMSource    RecordSource protocol + SyntheticSource
 nmcapd          CLI that wires them together
@@ -89,7 +92,16 @@ of a rewrite. The two are coupled only through `PacketContext`
 `makeContext` in `Sources/nmcapd/FlowMode.swift`. Keep that seam thin.
 
 L3/L4 parsers live in `NMFlow`, not in an analyzer module, because building a
-flow key requires them — putting them above `NMFlow` would be circular.
+flow key requires them — putting them above `NMFlow` would be circular. For the
+same reason the `PacketAnalyzer` protocol is declared in `NMFlow` (the engine
+calls it) while implementations live in `NMAnalyzers`.
+
+`HostnameCache` is in `NMFlow` under a protocol-neutral name, not inside the DNS
+analyzer: TLS SNI and HTTP Host will feed it too.
+
+Analyzers are **singletons**, not per-flow objects — a per-flow analyzer would
+put a heap allocation on flow creation, the path a SYN flood hammers. Per-flow
+state belongs in the flow entry or in a bounded table the analyzer keys itself.
 
 `RecordSource` + `SyntheticSource` exist so everything above the packet parser
 (storage, rollups, retention, IPC, UI) can be built and benchmarked with **no
@@ -158,6 +170,34 @@ Related invariants:
 - X.509 parsing, when it arrives, goes to `SecCertificate*`. Do not hand-write a
   DER parser in this process.
 
+## DNS specifics
+
+Name compression is the most reachable denial of service in the whole project.
+The rule that closes it is that **a pointer must target a strictly smaller
+offset** — a jump counter alone only bounds how long a cycle runs before it
+produces garbage. Both are implemented. Reserved label types (`01`, `10`) are
+rejected rather than read as literal lengths.
+
+Labels are escaped on render. A label may legally contain a dot, so an
+unescaped one lets `a.b` inside a single label impersonate two labels.
+
+Nothing iterates or allocates on the DNS header's record counts — they are
+attacker-supplied 16-bit values.
+
+The parser is **not a sufficient filter for "is this DNS"**: twelve bytes of
+anything form a valid header, so random payloads on port 53 parse into a message
+with a garbage opcode and no questions. `DNSAnalyzer.isPlausiblyDNS` adds the
+structural checks; without them a DNS tunnel or a port scan is logged as
+ordinary name resolution.
+
+Unanswered queries are reported via a pending table with a 5s timeout. A pairing
+that only fires on responses shows nothing in exactly the case a user is
+debugging. mDNS is excluded from pairing — it is broadcast with no expectation of
+a matching response, and pairing it manufactures phantom "unanswered" rows.
+
+CNAME chains resolve back to the name originally asked for. Caching the final
+CDN edge-node name would be technically true and useless.
+
 ## Honesty invariants
 
 The product's value depends on not presenting guesses as facts. These are
@@ -173,6 +213,10 @@ deliberate and should not be "simplified away":
   not error handling; the fallback sets `clamped`.
 - Direction calibration refuses to conclude anything when it has no
   locally-sourced packets to compare against.
+- Hostname lookups record which key matched (`dnsPerProcess` vs `dnsWildcard`)
+  and flag ambiguity when several names are on file, rather than presenting the
+  newest as fact. Enrichment runs at flow *creation* so the answer reflects what
+  was known when the connection was made.
 - TLS 1.3 encrypts the Certificate message, and ECH makes the visible SNI not
   the real destination. The UI must say "encrypted" / flag `sniIsOuter` rather
   than showing a confident wrong hostname.
@@ -243,7 +287,9 @@ Swift 6 language mode on every target.
 | PKTAP decode | Verified against live kernel output and Apple's tcpdump |
 | Flow tracking | 1.02M pps steady; bounded at capacity under SYN flood |
 | Storage | Benchmarked to 60k rows/s; schema and query plans measured |
-| DNS / TLS analyzers | Not started |
+| DNS parsing + analysis | Fuzzed in release; compression attacks covered |
+| Hostname enrichment | Per-process cache verified against the shared-CDN case |
+| TLS analyzer | Not started |
 | XPC, retention/seal, SwiftUI app, install scripts | Not started |
 
 Two probes from the plan remain unverified and both need root:
