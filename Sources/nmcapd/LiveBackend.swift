@@ -75,6 +75,26 @@ final class LiveBackend: DaemonBackend, @unchecked Sendable {
         }
     }
 
+    /// Records a closed flow in the live view.
+    ///
+    /// Split out from the engine callback because the daemon needs the same
+    /// record for the store, and having two subscribers to one closure would
+    /// mean whichever was installed last silently replaced the other.
+    func noteFlowClosed(_ record: ConnRecord) {
+        lock.lock()
+        ring.closeFlow(uid: record.uid.raw)
+        let key = record.exec?.name ?? "(unattributed)"
+        var entry = recentlyClosed[key]
+            ?? ProcessTraffic(execID: Int64(record.pid), name: key,
+                              bytesIn: 0, bytesOut: 0, flows: 0,
+                              viaProxy: record.proxyExec?.name)
+        entry.bytesIn += record.respIPBytes
+        entry.bytesOut += record.origIPBytes
+        entry.flows += 1
+        recentlyClosed[key] = entry
+        lock.unlock()
+    }
+
     /// Called from the packet path for every processed packet.
     func observe(context: PacketContext, l3Bytes: Int, fromOriginator: Bool) {
         lock.lock()

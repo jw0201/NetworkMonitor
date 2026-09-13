@@ -32,6 +32,8 @@ func usage() -> Never {
       nmcapd --flows-file <f>      The same, over a saved capture. NO ROOT NEEDED.
       nmcapd --ingest <f> [dbdir]  Run a saved capture through the whole pipeline
                                    into a real database. NO ROOT NEEDED.
+      nmcapd --daemon [root]       Run as the monitoring service. Requires root;
+                                   normally started by launchd, not by hand.
       nmcapd --live [secs] [--capture]
                                    Run the live pipeline and render it through
                                    the real XPC path. Synthetic traffic unless
@@ -84,6 +86,10 @@ case "--ingest":
         usage()
     }
     exit(await runIngest(path: file, databaseRoot: args.dropFirst(3).first))
+
+case "--daemon":
+    // How launchd starts it.
+    exit(await runDaemon(rootOverride: args.dropFirst(2).first))
 
 case "--live":
     let secs = args.dropFirst(2).first.flatMap(Double.init) ?? 15

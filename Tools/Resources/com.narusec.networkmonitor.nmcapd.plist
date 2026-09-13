@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.narusec.networkmonitor.nmcapd</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/libexec/nmcapd</string>
+        <string>--daemon</string>
+    </array>
+
+    <!-- The Mach service the app connects to. launchd owns the name; without
+         this key NSXPCListener(machServiceName:) fails at registration. -->
+    <key>MachServices</key>
+    <dict>
+        <key>com.narusec.networkmonitor.nmcapd</key>
+        <true/>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart on a crash but not on a clean exit, so `launchctl bootout`
+         actually stops it. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- Adaptive, never Background. The Background class has its disk I/O
+         throttled by the system, which for a capture daemon writing a log is
+         exactly backwards: it would shed packets to protect a disk that is not
+         the bottleneck. -->
+    <key>ProcessType</key>
+    <string>Adaptive</string>
+
+    <!-- launchd SIGTERMs and then SIGKILLs after this long. The daemon needs
+         the time to stop capture, write what is pending, checkpoint the WAL and
+         finalise open flows -- otherwise a restart silently loses whatever was
+         in flight. -->
+    <key>ExitTimeOut</key>
+    <integer>30</integer>
+
+    <!-- A BPF descriptor, the databases and their WAL sidecars, plus the pcap
+         ring. The default limit is low enough to matter. -->
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>4096</integer>
+    </dict>
+
+    <!-- If it crashes on startup, do not respawn in a tight loop. -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardErrorPath</key>
+    <string>/var/log/networkmonitor/nmcapd.err</string>
+</dict>
+</plist>

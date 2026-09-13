@@ -64,7 +64,13 @@ final class AppModel {
         // Try the installed daemon first. A short probe rather than a long
         // wait: if it is not there, the demo path should come up immediately
         // instead of leaving the window blank.
-        let real = DaemonClient(target: .machService(nmDaemonMachServiceName))
+        //
+        // The requirement is symmetric to the daemon's check on us. Without it
+        // another local process could impersonate the monitoring service and
+        // feed this UI fabricated data -- which for a security tool is a worse
+        // failure than not connecting at all.
+        let real = DaemonClient(target: .machService(nmDaemonMachServiceName),
+                                daemonRequirement: PeerPinning.daemonRequirement())
         if let status = try? await withTimeout(seconds: 1.5, operation: {
             try await real.status()
         }) {
