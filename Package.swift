@@ -41,13 +41,20 @@ let package = Package(
             swiftSettings: strict
         ),
 
+        // Storage: schema, the single-writer actor, rollups, retention.
+        .target(name: "NMStore", dependencies: ["NMCore"], swiftSettings: strict),
+
+        // Record producers. SyntheticSource lets the whole stack above the
+        // parser be built and benchmarked without root and without pcap.
+        .target(name: "NMSource", dependencies: ["NMCore"], swiftSettings: strict),
+
         // Tests are an executable, not a .testTarget: neither XCTest nor
         // swift-testing ships with the Command Line Tools, so `swift test`
         // cannot run here. Use `swift run nmtest`.
         .target(name: "NMTestKit", swiftSettings: strict),
         .executableTarget(
             name: "nmtest",
-            dependencies: ["NMTestKit", "NMCore", "NMCapture"],
+            dependencies: ["NMTestKit", "NMCore", "NMCapture", "NMSource", "NMStore"],
             swiftSettings: strict
         ),
     ]
