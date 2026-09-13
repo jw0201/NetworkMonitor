@@ -11,7 +11,10 @@
 //
 
 import Foundation
+import NMAnalyzers
 import NMCapture
+import NMCore
+import NMFlow
 
 func makeFixture(path: String, packets: Int) -> Int32 {
     // A believable mix: a plain app, delegated traffic, loopback, and a short
@@ -27,9 +30,43 @@ func makeFixture(path: String, packets: Int) -> Int32 {
         ("legacyd",      4004, "legacyd",      4004, "en0",  false, 1,  14, 0x06, 108),
     ]
 
+    // Names the synthetic traffic resolves, so a fixture exercises the whole
+    // chain -- query, answer, then a connection to the address that was
+    // returned -- rather than just the packet decoder.
+    let resolvedHosts: [(name: String, address: IPAddress, process: String, pid: Int32)] = [
+        ("www.apple.com", IPAddress("17.253.144.10")!, "Safari", 842),
+        ("slack.com", IPAddress("99.86.4.17")!, "Slack", 1204),
+        ("imap.mail.me.com", IPAddress("17.42.251.30")!, "Mail", 904),
+    ]
+
     do {
         let writer = try PcapFileWriter(path: path, snaplen: 2048)
         var timestamp = Double(Int(Date().timeIntervalSince1970)) - Double(packets) * 0.01
+
+        // A DNS lookup and its answer for each host, from the process that
+        // wants it, followed later by that process connecting to the address.
+        for (index, host) in resolvedHosts.enumerated() {
+            let clientPort = UInt16(54000 + index)
+            let query = DNSMessageBuilder.query(host.name,
+                                                transactionID: UInt16(0x1000 + index)).build()
+            let answer = DNSMessageBuilder.response(host.name, addresses: [host.address],
+                                                    ttl: 300,
+                                                    transactionID: UInt16(0x1000 + index)).build()
+
+            try writeDNS(writer, at: &timestamp, payload: query, outbound: true,
+                         clientPort: clientPort, process: host.process, pid: host.pid)
+            try writeDNS(writer, at: &timestamp, payload: answer, outbound: false,
+                         clientPort: clientPort, process: host.process, pid: host.pid)
+
+            // The connection that follows, which enrichment should label.
+            for (flags, outbound) in [(TCPFlags([.syn]), true),
+                                      (TCPFlags([.syn, .ack]), false),
+                                      (TCPFlags([.psh, .ack]), true)] {
+                try writeTCP(writer, at: &timestamp, host: host,
+                             clientPort: UInt16(49000 + index), flags: flags,
+                             outbound: outbound)
+            }
+        }
 
         for i in 0..<packets {
             let r = recipes[i % recipes.count]
@@ -90,7 +127,9 @@ func makeFixture(path: String, packets: Int) -> Int32 {
         try writer.close()
 
         print("""
-        wrote \(packets) synthetic pktap packets to \(path)
+        wrote \(packets + resolvedHosts.count * 5) synthetic pktap packets to \(path)
+        including \(resolvedHosts.count) DNS lookups, each followed by a connection
+        to the address it returned
         link type 258 (LINKTYPE_PKTAP)
 
         Replay it with:
@@ -104,4 +143,62 @@ func makeFixture(path: String, packets: Int) -> Int32 {
         print("failed: \(error)")
         return 1
     }
+}
+
+/// Writes a UDP/53 packet carrying `payload`, wrapped in a pktap header.
+private func writeDNS(_ writer: PcapFileWriter, at timestamp: inout Double,
+                      payload: [UInt8], outbound: Bool, clientPort: UInt16,
+                      process: String, pid: Int32) throws {
+    let client = IPAddress("192.168.0.31")!
+    let resolver = IPAddress("192.168.0.1")!
+    let ip = outbound
+        ? PacketFixture.ipv4UDP(source: client, sourcePort: clientPort,
+                                destination: resolver, destinationPort: 53,
+                                payload: payload)
+        : PacketFixture.ipv4UDP(source: resolver, sourcePort: 53,
+                                destination: client, destinationPort: clientPort,
+                                payload: payload)
+    try write(writer, at: &timestamp, ip: ip, outbound: outbound,
+              process: process, pid: pid)
+}
+
+private func writeTCP(_ writer: PcapFileWriter, at timestamp: inout Double,
+                      host: (name: String, address: IPAddress, process: String, pid: Int32),
+                      clientPort: UInt16, flags: TCPFlags, outbound: Bool) throws {
+    let client = IPAddress("192.168.0.31")!
+    let payload: [UInt8] = flags.contains(.psh)
+        ? [UInt8](repeating: 0x41, count: 517) : []
+    let ip = outbound
+        ? PacketFixture.ipv4TCP(.init(source: client, sourcePort: clientPort,
+                                      destination: host.address, destinationPort: 443,
+                                      flags: flags, payload: payload))
+        : PacketFixture.ipv4TCP(.init(source: host.address, sourcePort: 443,
+                                      destination: client, destinationPort: clientPort,
+                                      flags: flags, payload: payload))
+    try write(writer, at: &timestamp, ip: ip, outbound: outbound,
+              process: host.process, pid: host.pid)
+}
+
+private func write(_ writer: PcapFileWriter, at timestamp: inout Double,
+                   ip: [UInt8], outbound: Bool, process: String, pid: Int32) throws {
+    var b = PktapHeaderBuilder()
+    b.comm = process
+    b.pid = pid
+    b.ecomm = process
+    b.epid = pid
+    b.ifname = "en0"
+    b.dlt = 1
+    b.framePreLength = 14
+    b.ifType = 0x06
+    // Verified against live kernel output: 0x2 is outbound, 0x1 inbound.
+    b.flags = outbound ? 0x0002 : 0x0001
+
+    var ethernet = [UInt8](repeating: 0, count: 14)
+    ethernet[12] = 0x08
+    ethernet[13] = 0x00
+    let record = b.build(payload: ethernet + ip)
+    try record.withUnsafeBytes {
+        try writer.write(timestamp: timestamp, originalLength: record.count, bytes: $0)
+    }
+    timestamp += 0.005
 }

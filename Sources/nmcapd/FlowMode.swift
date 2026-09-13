@@ -10,6 +10,7 @@
 import CPktap
 import Darwin
 import Foundation
+import NMAnalyzers
 import NMCapture
 import NMCore
 import NMFlow
@@ -39,18 +40,21 @@ func makeContext(_ meta: PktapMetadata, timestamp: Double, lossEpoch: UInt64) ->
 private struct FlowPrinter {
     var rows: [ConnRecord] = []
     var reasons: [FlowEndReason] = []
+    var dnsRows: [DNSRecord] = []
 
     mutating func add(_ r: ConnRecord, _ reason: FlowEndReason) {
         rows.append(r)
         reasons.append(reason)
     }
 
+    mutating func addDNS(_ r: DNSRecord) { dnsRows.append(r) }
+
     func printTable(limit: Int) {
         print("")
-        print(col("ts", 13) + col("proto", 6) + col("originator", 24)
-              + col("responder", 24) + col("state", 7) + col("hist", 10)
+        print(col("ts", 13) + col("proto", 6) + col("originator", 22)
+              + col("responder", 34) + col("state", 7) + col("hist", 10)
               + col("orig B", 10) + col("resp B", 10) + "process")
-        print(String(repeating: "-", count: 124))
+        print(String(repeating: "-", count: 134))
 
         // Biggest conversations first: that is what a person actually looks for.
         let ordered = rows.enumerated()
@@ -70,10 +74,19 @@ private struct FlowPrinter {
             if let proxy = r.proxyExec?.name { process += " (via \(proxy))" }
             if r.captureLossSuspected { process += "  ~approx" }
 
+            // Show the name the process asked for when we have one; a bare
+            // address is what this tool exists to avoid making people read.
+            var responder = "\(r.respAddr):\(r.respPort)"
+            if let host = r.hostname {
+                responder = "\(host):\(r.respPort)"
+                if r.hostnameAmbiguous { responder += " ?" }
+                if r.hostnameSource == .dnsWildcard { responder += " ~" }
+            }
+
             print(col(shortTime(r.ts), 13)
                   + col(proto, 6)
-                  + col("\(r.origAddr):\(r.origPort)", 24)
-                  + col("\(r.respAddr):\(r.respPort)", 24)
+                  + col("\(r.origAddr):\(r.origPort)", 22)
+                  + col(responder, 34)
                   + col(r.state.rawValue, 7)
                   + col(r.history.isEmpty ? "-" : r.history, 10)
                   + col(bytes(r.origIPBytes), 10)
@@ -82,6 +95,59 @@ private struct FlowPrinter {
         }
         if rows.count > limit {
             print("  ... \(rows.count - limit) more")
+        }
+    }
+
+    func printDNS(limit: Int) {
+        guard !dnsRows.isEmpty else { return }
+        print("\nDNS")
+        print(String(repeating: "-", count: 134))
+        print(col("ts", 13) + col("query", 44) + col("type", 7)
+              + col("rcode", 9) + col("rtt", 10) + "answers")
+        print(String(repeating: "-", count: 134))
+
+        for r in dnsRows.prefix(limit) {
+            let rcode = r.rejected ? "no reply" : rcodeName(r.rcode)
+            let rtt = r.rttUs.map { String(format: "%.1f ms", Double($0) / 1000) } ?? "-"
+            let answers = r.answers.isEmpty ? "-" : r.answers.prefix(3).joined(separator: ", ")
+            print(col(shortTime(r.ts), 13) + col(r.query, 44)
+                  + col(qtypeName(r.qtype), 7) + col(rcode, 9)
+                  + col(rtt, 10) + answers)
+        }
+        if dnsRows.count > limit { print("  ... \(dnsRows.count - limit) more") }
+
+        let unanswered = dnsRows.filter(\.rejected).count
+        let failures = dnsRows.filter { $0.rcode != 0 && !$0.rejected }.count
+        if unanswered > 0 || failures > 0 {
+            print("")
+            if unanswered > 0 {
+                print("  \(unanswered) quer\(unanswered == 1 ? "y" : "ies") went unanswered "
+                      + "-- a blocked resolver, a captive portal, or dropped packets.")
+            }
+            if failures > 0 {
+                print("  \(failures) returned an error code.")
+            }
+        }
+    }
+
+    private func rcodeName(_ code: UInt16) -> String {
+        switch code {
+        case 0: return "NOERROR"
+        case 2: return "SERVFAIL"
+        case 3: return "NXDOMAIN"
+        case 5: return "REFUSED"
+        default: return "RCODE\(code)"
+        }
+    }
+
+    private func qtypeName(_ type: UInt16) -> String {
+        switch type {
+        case 1: return "A"
+        case 5: return "CNAME"
+        case 12: return "PTR"
+        case 28: return "AAAA"
+        case 65: return "HTTPS"
+        default: return "TYPE\(type)"
         }
     }
 
@@ -112,6 +178,21 @@ private struct FlowPrinter {
         print(String(repeating: "-", count: 124))
         for (state, n) in byState.sorted(by: { $0.value > $1.value }) {
             print("  " + col(state, 8) + "\(n)  " + explain(state))
+        }
+
+        let named = rows.filter { $0.hostname != nil }.count
+        if !rows.isEmpty {
+            let pct = 100 * named / rows.count
+            print("""
+
+            Hostname enrichment
+            \(String(repeating: "-", count: 134))
+              \(named) of \(rows.count) connections resolved to a name (\(pct)%)
+              per-process cache hits  \(engine.hostnames.stats.perProcessHits)
+              wildcard fallbacks      \(engine.hostnames.stats.wildcardHits)  (marked ~)
+              ambiguous               \(engine.hostnames.stats.ambiguousHits)  (marked ?)
+              misses                  \(engine.hostnames.stats.misses)
+            """)
         }
 
         let s = engine.stats
@@ -189,8 +270,10 @@ func runFlowsFromFile(path: String, limit: Int) -> Int32 {
     """)
 
     let engine = FlowEngine()
+    engine.analyzers.register(DNSAnalyzer())
     var printer = FlowPrinter()
     engine.onConnectionRecord = { record, reason in printer.add(record, reason) }
+    engine.onDNSRecord = { record in printer.addDNS(record) }
 
     let result = replay.replayAll { meta, record, timestamp in
         var l3 = (try? record.reader(at: meta.l3Offset,
@@ -202,6 +285,7 @@ func runFlowsFromFile(path: String, limit: Int) -> Int32 {
 
     print("packets    \(result.decoded) decoded, \(result.decodeFailures) failed")
     printer.printTable(limit: limit)
+    printer.printDNS(limit: limit)
     printer.printSummary(engine)
     return 0
 }
@@ -237,8 +321,10 @@ func runFlowsLive(seconds: Double, limit: Int) -> Int32 {
     """)
 
     let engine = FlowEngine()
+    engine.analyzers.register(DNSAnalyzer())
     var printer = FlowPrinter()
     engine.onConnectionRecord = { record, reason in printer.add(record, reason) }
+    engine.onDNSRecord = { record in printer.addDNS(record) }
 
     let deadline = Date().addingTimeInterval(seconds)
     var lastStats = CaptureStats()
@@ -263,6 +349,7 @@ func runFlowsLive(seconds: Double, limit: Int) -> Int32 {
         print("packets    \(s.received) received, \(s.kernelDropped) dropped by the kernel")
     }
     printer.printTable(limit: limit)
+    printer.printDNS(limit: limit)
     printer.printSummary(engine)
     return 0
 }
