@@ -28,13 +28,26 @@ let package = Package(
         // sanctioned way to read packet bytes anywhere in the project.
         .target(name: "NMCore", dependencies: [], swiftSettings: strict),
 
+        // Root-only surface: pcap handle, pktap decode, packet ring.
+        //
+        // NMCapture must NOT import the flow or analyzer modules. It is the
+        // only code holding a root-privileged BPF handle, and keeping it free
+        // of parsers is what makes a later split into a small root capturer
+        // plus an unprivileged analyzer a main.swift change instead of a
+        // rewrite. The boundary is unrecoverable if not enforced from the start.
+        .target(
+            name: "NMCapture",
+            dependencies: ["CPktap", "NMCore"],
+            swiftSettings: strict
+        ),
+
         // Tests are an executable, not a .testTarget: neither XCTest nor
         // swift-testing ships with the Command Line Tools, so `swift test`
         // cannot run here. Use `swift run nmtest`.
         .target(name: "NMTestKit", swiftSettings: strict),
         .executableTarget(
             name: "nmtest",
-            dependencies: ["NMTestKit", "NMCore"],
+            dependencies: ["NMTestKit", "NMCore", "NMCapture"],
             swiftSettings: strict
         ),
     ]
