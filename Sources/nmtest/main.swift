@@ -12,5 +12,6 @@ runHostnameCacheTests()
 runStreamBufferTests()
 runTLSTests()
 await runRetentionTests()
+await runIPCTests()
 
 exit(NMTest.finish())

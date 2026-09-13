@@ -51,6 +51,9 @@ let package = Package(
         // never the other way round.
         .target(name: "NMAnalyzers", dependencies: ["NMCore", "NMFlow"], swiftSettings: strict),
 
+        // Inter-process interface: wire types, listener, client.
+        .target(name: "NMIPC", dependencies: ["NMCore", "NMStore"], swiftSettings: strict),
+
         // Storage: schema, the single-writer actor, rollups, retention.
         .target(name: "NMStore", dependencies: ["NMCore"], swiftSettings: strict),
 
@@ -60,7 +63,7 @@ let package = Package(
 
         .executableTarget(
             name: "nmcapd",
-            dependencies: ["NMAnalyzers", "NMCapture", "NMCore", "NMFlow", "NMSource", "NMStore"],
+            dependencies: ["NMAnalyzers", "NMCapture", "NMCore", "NMFlow", "NMIPC", "NMSource", "NMStore"],
             swiftSettings: strict
         ),
 
@@ -70,7 +73,7 @@ let package = Package(
         .target(name: "NMTestKit", swiftSettings: strict),
         .executableTarget(
             name: "nmtest",
-            dependencies: ["NMTestKit", "NMAnalyzers", "NMCore", "NMCapture", "NMFlow", "NMSource", "NMStore"],
+            dependencies: ["NMTestKit", "NMAnalyzers", "NMCore", "NMCapture", "NMFlow", "NMIPC", "NMSource", "NMStore"],
             swiftSettings: strict
         ),
     ]
