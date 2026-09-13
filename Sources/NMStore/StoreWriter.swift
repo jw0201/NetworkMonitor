@@ -70,6 +70,10 @@ public actor StoreWriter {
         var path: String
         var uuidHi: UInt64
         var uuidLo: UInt64
+        /// Part of the key, matching the unique index. Without it an identity
+        /// carrying neither a path nor a UUID merges with every other such
+        /// identity.
+        var name: String
     }
     private var execCache: [ExecKey: Int64] = [:]
     private var ifaceCache: [String: Int64] = [:]
@@ -171,11 +175,12 @@ public actor StoreWriter {
 
     private static func loadExecCache(_ db: SQLiteConnection) throws -> [ExecKey: Int64] {
         var cache: [ExecKey: Int64] = [:]
-        let s = try db.prepare("SELECT id, path, uuid_hi, uuid_lo FROM meta.exec")
+        let s = try db.prepare("SELECT id, path, uuid_hi, uuid_lo, name FROM meta.exec")
         while try s.step() {
             let key = ExecKey(path: s.text(1) ?? "",
                               uuidHi: UInt64(bitPattern: s.int64(2)),
-                              uuidLo: UInt64(bitPattern: s.int64(3)))
+                              uuidLo: UInt64(bitPattern: s.int64(3)),
+                              name: s.text(4) ?? "")
             cache[key] = s.int64(0)
         }
         return cache
@@ -190,7 +195,8 @@ public actor StoreWriter {
 
     private func execID(for info: ExecInfo?, now: Timestamp) throws -> Int64? {
         guard let info else { return nil }
-        let key = ExecKey(path: info.path, uuidHi: info.uuidHi, uuidLo: info.uuidLo)
+        let key = ExecKey(path: info.path, uuidHi: info.uuidHi,
+                          uuidLo: info.uuidLo, name: info.name)
         if let id = execCache[key] { return id }
 
         let insert = try db.prepare("""
@@ -198,7 +204,7 @@ public actor StoreWriter {
               (path, name, bundle_id, signing_id, team_id,
                uuid_hi, uuid_lo, is_platform, first_seen, last_seen)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
-            ON CONFLICT(path, uuid_hi, uuid_lo) DO UPDATE SET last_seen = ?9
+            ON CONFLICT(path, uuid_hi, uuid_lo, name) DO UPDATE SET last_seen = ?9
             """)
         insert.bind(1, info.path)
         insert.bind(2, info.name)
@@ -211,11 +217,14 @@ public actor StoreWriter {
         insert.bind(9, now)
         try insert.run()
 
-        let select = try db.prepare(
-            "SELECT id FROM meta.exec WHERE path = ?1 AND uuid_hi = ?2 AND uuid_lo = ?3")
+        let select = try db.prepare("""
+            SELECT id FROM meta.exec
+             WHERE path = ?1 AND uuid_hi = ?2 AND uuid_lo = ?3 AND name = ?4
+            """)
         select.bind(1, info.path)
         select.bind(2, Int64(bitPattern: info.uuidHi))
         select.bind(3, Int64(bitPattern: info.uuidLo))
+        select.bind(4, info.name)
         defer { select.reset() }
         guard try select.step() else { return nil }
         let id = select.int64(0)

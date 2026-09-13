@@ -37,6 +37,8 @@ public final class DNSAnalyzer: PacketAnalyzer {
         var proto: UInt8
         var pid: Int32
         var processName: String
+        var uuidHi: UInt64
+        var uuidLo: UInt64
         var flowUID: FlowID
     }
 
@@ -167,6 +169,8 @@ public final class DNSAnalyzer: PacketAnalyzer {
                                     proto: context.proto,
                                     pid: context.packet.pid ?? 0,
                                     processName: context.packet.processName,
+                                    uuidHi: context.packet.uuidHi,
+                                    uuidLo: context.packet.uuidLo,
                                     flowUID: context.flowUID)
     }
 
@@ -198,10 +202,17 @@ public final class DNSAnalyzer: PacketAnalyzer {
         if let matched {
             record.rttUs = context.packet.timestamp - matched.askedAt
             if !matched.processName.isEmpty {
-                record.exec = ExecInfo(path: "", name: matched.processName)
+                // The UUID has to travel with the name. Without it every
+                // analyzer-produced identity has the same (path, uuid) key and
+                // they all intern to a single row -- so one process's name ends
+                // up on every other process's records.
+                record.exec = ExecInfo(path: "", name: matched.processName,
+                                       uuidHi: matched.uuidHi, uuidLo: matched.uuidLo)
             }
         } else if !context.packet.processName.isEmpty {
-            record.exec = ExecInfo(path: "", name: context.packet.processName)
+            record.exec = ExecInfo(path: "", name: context.packet.processName,
+                                   uuidHi: context.packet.uuidHi,
+                                   uuidLo: context.packet.uuidLo)
         }
 
         // Resolve each address back through the CNAME chain to the name that
@@ -277,7 +288,8 @@ public final class DNSAnalyzer: PacketAnalyzer {
                                    pid: query.pid)
             record.uid = query.flowUID
             if !query.processName.isEmpty {
-                record.exec = ExecInfo(path: "", name: query.processName)
+                record.exec = ExecInfo(path: "", name: query.processName,
+                                       uuidHi: query.uuidHi, uuidLo: query.uuidLo)
             }
             emit(.dns(record))
         }

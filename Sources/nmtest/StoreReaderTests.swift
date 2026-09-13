@@ -384,3 +384,85 @@ func runStoreReaderTests() async {
         }
     }
 }
+
+/// Attribution has to survive the whole path, not just each layer in isolation.
+///
+/// Found live: every DNS query from Chrome was recorded against an unrelated
+/// helper process. Each layer was correct on its own -- the packets carried the
+/// right process, the analyzer read it, the store wrote it -- but the store's
+/// identity key was (path, uuid) and analyzers supplied neither, so every
+/// analyzer-produced identity interned to one row and inherited whichever name
+/// arrived first.
+func runAttributionTests() async {
+    await NMTest.suite("Attribution / end to end") {
+
+        await NMTest.test("processes with no path stay distinct") {
+            let root = NSTemporaryDirectory() + "nm-attr-\(getpid())-\(Int.random(in: 0...9999))"
+            defer { try? FileManager.default.removeItem(atPath: root) }
+            let paths = Paths.temporary(root)
+            let writer = try StoreWriter(paths: paths)
+
+            let base: Timestamp = 1_789_257_600_000_000
+            var batch = RecordBatch()
+
+            // Exactly what the analyzers produce: a name and a UUID, no path.
+            for (index, name) in ["Google Chrome Helper", "gh", "Slack"].enumerated() {
+                var record = DNSRecord(
+                    ts: base + Timestamp(index) * 1000, proto: 17,
+                    clientAddr: IPAddress("192.168.0.31")!,
+                    serverAddr: IPAddress("192.168.0.1")!,
+                    serverPort: 53, transactionID: UInt16(index),
+                    query: "host\(index).example.com", qtype: 1,
+                    answers: ["1.2.3.\(index + 1)"], ttls: [300])
+                record.rttUs = 1000
+                record.exec = ExecInfo(path: "", name: name,
+                                       uuidHi: UInt64(0xAAAA + index),
+                                       uuidLo: UInt64(0xBBBB + index))
+                batch.dns.append(record)
+            }
+            try await writer.write(batch)
+            try await writer.flush()
+            await writer.close()
+
+            let reader = StoreReader(paths: paths)
+            let page = try await reader.dnsQueries(QuerySpec(kind: .dns, limit: 100))
+            let names = Set(page.rows.compactMap(\.processName))
+
+            NMTest.equal(names.count, 3,
+                         "three processes collapsed to \(names.count): \(names)")
+            NMTest.expect(names.contains("Google Chrome Helper"))
+            NMTest.expect(names.contains("gh"))
+            await reader.close()
+        }
+
+        // The safety net for the case that actually happened: no path AND no
+        // UUID. Distinct names must still not merge.
+        await NMTest.test("identities with neither path nor UUID stay distinct") {
+            let root = NSTemporaryDirectory() + "nm-attr2-\(getpid())-\(Int.random(in: 0...9999))"
+            defer { try? FileManager.default.removeItem(atPath: root) }
+            let paths = Paths.temporary(root)
+            let writer = try StoreWriter(paths: paths)
+
+            var batch = RecordBatch()
+            for (index, name) in ["Safari", "Mail", "Spotify"].enumerated() {
+                var record = DNSRecord(
+                    ts: 1_789_257_600_000_000 + Timestamp(index), proto: 17,
+                    clientAddr: IPAddress("192.168.0.31")!,
+                    serverAddr: IPAddress("192.168.0.1")!,
+                    serverPort: 53, transactionID: UInt16(index),
+                    query: "q\(index).example.com", qtype: 1)
+                record.exec = ExecInfo(path: "", name: name)   // no uuid at all
+                batch.dns.append(record)
+            }
+            try await writer.write(batch)
+            try await writer.flush()
+            await writer.close()
+
+            let reader = StoreReader(paths: paths)
+            let page = try await reader.dnsQueries(QuerySpec(kind: .dns, limit: 100))
+            NMTest.equal(Set(page.rows.compactMap(\.processName)).count, 3,
+                         "a zero UUID must not merge distinct processes")
+            await reader.close()
+        }
+    }
+}

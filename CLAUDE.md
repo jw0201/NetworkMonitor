@@ -467,11 +467,20 @@ Swift 6 language mode on every target.
 | TLS analysis + JA4/JA3 | JA4_b pinned to the published reference value |
 | XPC, retention/seal, SwiftUI app, install scripts | Not started |
 
-Two probes from the plan remain unverified:
-**P4** (does lo0 really double-tap as assumed) and **P5** (does `pth_epid` on
-DNS packets name the *requesting* application — the pid-keyed DNS cache degrades
-gracefully to wildcard if not). Both are now answerable against the live
-install rather than needing a special capture.
+Both outstanding probes have now been checked against live capture:
+
+- **P4 (loopback double-tap): confirmed.** 67 live `lo0` flows show non-zero
+  bytes in both directions in realistic proportions. Counting only the outbound
+  copy is correct; the alternative would double every localhost byte.
+- **P5 (`pth_epid` on DNS): the packets are fine, the pipeline was not.** See
+  DECISIONS S12. `conn` recorded 819 DNS flows from Chrome while `dns` showed
+  none, because every analyzer-produced `ExecInfo` had no path and no UUID and
+  so interned to a single `exec` row. Fixed in schema v2; **an existing install
+  must be reinstalled to pick it up.**
+
+The lesson generalises: every layer passed its own tests, and the failure lived
+only at the boundary between them. Query real captured data and check that
+tables agree with each other.
 
 ## Installed layout
 

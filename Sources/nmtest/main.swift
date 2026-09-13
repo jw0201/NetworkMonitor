@@ -16,5 +16,6 @@ await runIPCTests()
 await runStoreReaderTests()
 runFilterParserTests()
 await runCheckpointTests()
+await runAttributionTests()
 
 exit(NMTest.finish())

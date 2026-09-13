@@ -39,6 +39,8 @@ public final class TLSAnalyzer: PacketAnalyzer {
         var serverPort: UInt16
         var pid: Int32
         var processName: String
+        var uuidHi: UInt64
+        var uuidLo: UInt64
 
         var clientHello: TLSClientHello?
         var serverHello: TLSServerHello?
@@ -108,7 +110,9 @@ public final class TLSAnalyzer: PacketAnalyzer {
                                     serverPort: context.fromOriginator
                                         ? context.destinationPort : context.sourcePort,
                                     pid: context.packet.pid ?? 0,
-                                    processName: context.packet.processName)
+                                    processName: context.packet.processName,
+                                    uuidHi: context.packet.uuidHi,
+                                    uuidLo: context.packet.uuidLo)
         }
         guard var session = sessions[uid], !session.emitted else { return .satisfied }
 
@@ -245,7 +249,8 @@ public final class TLSAnalyzer: PacketAnalyzer {
         }
 
         if !session.processName.isEmpty {
-            record.exec = ExecInfo(path: "", name: session.processName)
+            record.exec = ExecInfo(path: "", name: session.processName,
+                                   uuidHi: session.uuidHi, uuidLo: session.uuidLo)
         }
         emit(.ssl(record))
     }

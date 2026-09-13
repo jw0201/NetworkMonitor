@@ -30,7 +30,7 @@ import SQLite3
 public enum Schema {
 
     /// Bumped whenever the DDL changes. Stored in `PRAGMA user_version`.
-    public static let version: Int32 = 1
+    public static let version: Int32 = 2
 
     // MARK: - Pragmas
 
@@ -229,9 +229,17 @@ public enum Schema {
       last_seen   INTEGER NOT NULL
     ) STRICT;
 
-    -- Identity is (path, Mach-O UUID), not path alone: that is what makes pid
-    -- reuse and binary updates distinguishable rather than silently conflated.
-    CREATE UNIQUE INDEX IF NOT EXISTS ux_exec_ident ON exec(path, uuid_hi, uuid_lo);
+    -- Identity is (path, Mach-O UUID, name), not path alone: the UUID is what
+    -- makes pid reuse and binary updates distinguishable rather than silently
+    -- conflated.
+    --
+    -- `name` is in the key as a safety net, and it was earned. A caller that
+    -- supplies an identity with no path and no UUID -- which an analyzer did --
+    -- otherwise collides with every other such caller, and one process's name
+    -- lands on every other process's records. Observed live: every DNS query
+    -- from Chrome was attributed to an unrelated helper.
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_exec_ident
+        ON exec(path, uuid_hi, uuid_lo, name);
     CREATE INDEX IF NOT EXISTS ix_exec_name ON exec(name);
 
     -- Domain names, interned.

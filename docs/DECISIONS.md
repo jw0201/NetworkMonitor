@@ -544,6 +544,47 @@ review.
 
 ---
 
+### S12. The exec identity key includes `name`
+
+Found live, and it is the clearest example in the project of a bug that lives
+only at a layer boundary.
+
+`conn` correctly recorded 819 DNS flows from Google Chrome Helper. The `dns`
+table showed none: every analyzer-produced record was attributed to an unrelated
+helper, or to nothing.
+
+Each layer was right on its own. The packets carried the process (pktap), the
+analyzer read it, the store wrote it. But the store's identity key was
+`(path, uuid_hi, uuid_lo)` and the analyzers supplied `ExecInfo(path: "", name:)`
+with **no path and no UUID** — so every analyzer-produced identity collided on
+`("", 0, 0)` and inherited whichever name was interned first.
+
+Two fixes, because the second is the one that would have prevented it:
+
+- Analyzers now pass the Mach-O UUID from the packet context, which is what
+  actually distinguishes one binary from another.
+- `name` is part of the unique index, so an identity with neither a path nor a
+  UUID still cannot merge with a different process.
+
+No unit test could have caught this: each layer passed its own tests, and the
+failure needs several *different* processes flowing through the whole path. It
+was found by querying real captured data and noticing that two tables
+disagreed about the same traffic.
+
+> Verification probes are worth running against real data even when every
+> component is tested.
+
+### S13. Verified against live capture: loopback double-tap (P4)
+
+The design assumes the kernel taps a loopback packet twice — once outbound at
+the sender, once inbound at the receiver — and therefore counts only the
+outbound copy, or every localhost byte would double.
+
+Confirmed on 67 live `lo0` flows: byte counts are non-zero in **both**
+directions and in realistic proportions for a local development server (small
+requests, large responses). Had the assumption been wrong, one direction would
+have read zero or the totals would have been doubled.
+
 ## Measurement
 
 ### M1. Benchmarks print the machine's load average
