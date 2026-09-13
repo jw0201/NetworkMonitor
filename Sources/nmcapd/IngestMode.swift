@@ -46,7 +46,9 @@ func runIngest(path: String, databaseRoot: String?) async -> Int32 {
 
     """)
 
-    let engine = FlowEngine()
+    // Ingesting a second capture into the same store hits exactly the restart
+    // case the daemon does, so seed the same way.
+    let engine = FlowEngine(table: FlowTable(firstUID: writer.highestFlowUID + 1))
     engine.analyzers.register(DNSAnalyzer())
     engine.analyzers.register(TLSAnalyzer())
 

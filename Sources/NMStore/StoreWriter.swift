@@ -113,6 +113,14 @@ public actor StoreWriter {
     /// recovered from rows already in the live file after a restart.
     public private(set) var currentDay: String?
 
+    /// The largest `conn.uid` already in the live file, or 0 when it is empty.
+    ///
+    /// Read once at open so a restarting daemon can continue the sequence
+    /// instead of replaying it. `nonisolated` because it is immutable and
+    /// `Sendable`: the caller that needs it is wiring the flow table up before
+    /// any packet arrives, and should not have to await the writer to do it.
+    public nonisolated let highestFlowUID: UInt64
+
     // MARK: - Lifecycle
 
     public init(paths: Paths, createDirectories: Bool = true) throws {
@@ -148,6 +156,9 @@ public actor StoreWriter {
         if let latest = try? db.scalarInt("SELECT max(ts) FROM conn"), latest > 0 {
             self.currentDay = Time.utcDayString(latest)
         }
+        // Same reason as the day above: the file, not the clock or a fresh
+        // counter, is what says where the previous run got to.
+        self.highestFlowUID = UInt64(max(0, (try? db.scalarInt("SELECT max(uid) FROM conn")) ?? 0))
     }
 
     private static func attach(_ db: SQLiteConnection, path: String, alias: String,

@@ -466,6 +466,28 @@ Design consequences, all measured:
   cause. `Statement.step()` auto-resets on `SQLITE_DONE` to make the whole class
   of bug impossible.
 
+## Flow ids survive a restart
+
+`conn.uid` is the join key from `dns`, `ssl` and the pcap index back to `conn`,
+and it is unique per day file. `FlowTable`'s counter therefore **must be seeded
+from the store on startup** (`StoreWriter.highestFlowUID`), because a daemon
+restarting part-way through a day — an upgrade, a crash, a reboot — writes into
+a `live.db` that already holds today's ids.
+
+Unseeded, the damage is worse than it first looks:
+
+- Every insert whose id already exists fails, and since a batch is **one
+  transaction**, the DNS and TLS rows written alongside it are rolled back too.
+  Measured on a live install: ~99.5% of `conn` rows lost, `dns`/`ssl` losing
+  whatever shared their batch.
+- The ids that *do* land are ambiguous. A new flow taking id 500 joins to the
+  previous run's flow 500 — silently wrong data rather than missing data.
+- It is invisible from the outside. The only symptom is `write failed: sqlite
+  error 19 (step): UNIQUE constraint failed: conn.uid` in the unified log.
+
+Rotation is the opposite case and needs nothing: the new `live.db` is empty, so
+a counter that keeps climbing is already correct.
+
 ## Concurrency
 
 Swift 6 language mode on every target.

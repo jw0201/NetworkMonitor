@@ -52,7 +52,15 @@ func runDaemon(rootOverride: String?) async -> Int32 {
         return 1
     }
 
-    let backend = LiveBackend(paths: paths)
+    // Continue the flow-id sequence where the previous run left off. A restart
+    // part-way through a day is ordinary -- an upgrade, a crash, a reboot -- and
+    // starting over at 1 collides with every id already in today's file.
+    let backend = LiveBackend(
+        paths: paths,
+        engine: FlowEngine(table: FlowTable(firstUID: writer.highestFlowUID + 1)))
+    if writer.highestFlowUID > 0 {
+        log.notice("resuming flow ids after \(writer.highestFlowUID, privacy: .public)")
+    }
     let coordinator = DaemonCoordinator(paths: paths, writer: writer, backend: backend)
 
     // XPC before capture, so an app that is already running connects promptly

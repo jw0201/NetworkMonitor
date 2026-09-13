@@ -179,14 +179,26 @@ public final class FlowTable {
     /// shedding the least valuable entries first.
     public private(set) var floodMode = false
 
-    public init(capacity: Int = Limits.maxConcurrentFlows) {
+    /// - Parameter firstUID: the first flow id to hand out. **A daemon that
+    ///   restarts part-way through a day must seed this from the store.** Flow
+    ///   ids are the join key from `dns`/`ssl`/`pcap` back to `conn` and are
+    ///   unique per day file, so a counter that restarts at 1 against a
+    ///   populated `live.db` collides on every insert -- and because a batch is
+    ///   one transaction, each collision also discards the DNS and TLS rows
+    ///   written alongside it. Worse than the loss, the ids that do land are
+    ///   ambiguous: a new flow's id would join to an old flow's row.
+    public init(capacity: Int = Limits.maxConcurrentFlows, firstUID: UInt64 = 1) {
         self.capacity = capacity
+        self.nextUID = max(firstUID, 1)
         self.entries = []
         self.entries.reserveCapacity(min(capacity, 8192))
         self.wheel = [Int32](repeating: -1, count: Self.wheelSlots)
     }
 
     public var count: Int { index.count }
+
+    /// The id the next flow will be given. For tests and diagnostics.
+    public var peekNextUID: UInt64 { nextUID }
 
     /// Visits currently-open flows, newest activity first, up to `limit`.
     ///

@@ -9,6 +9,7 @@
 
 import Foundation
 import NMCore
+import NMFlow
 import NMStore
 import NMTestKit
 
@@ -395,6 +396,89 @@ func runStoreReaderTests() async {
 /// arrived first.
 func runAttributionTests() async {
     await NMTest.suite("Attribution / end to end") {
+
+        // A daemon restarting part-way through a day -- an upgrade, a crash, a
+        // reboot -- writes into a live.db that already holds today's flows.
+        await NMTest.test("flow ids resume after a restart instead of colliding") {
+            let root = NSTemporaryDirectory() + "nm-uid-\(getpid())-\(Int.random(in: 0...9999))"
+            defer { try? FileManager.default.removeItem(atPath: root) }
+            let paths = Paths.temporary(root)
+            let base: Timestamp = 1_789_257_600_000_000
+
+            // First run: flow ids 1...20, the sequence a fresh FlowTable hands out.
+            let first = try StoreWriter(paths: paths)
+            NMTest.equal(first.highestFlowUID, 0, "a fresh store reported flow ids already on file")
+            var batch = RecordBatch()
+            for uid in 1...20 {
+                batch.conns.append(makeConn(ts: base + Timestamp(uid) * 1000, uid: Int64(uid)))
+            }
+            try await first.write(batch)
+            try await first.flush()
+            await first.close()
+
+            // Restart.
+            let second = try StoreWriter(paths: paths)
+            NMTest.equal(second.highestFlowUID, 20,
+                         "restart saw \(second.highestFlowUID) as the highest flow id, not 20")
+
+            // The table must continue the sequence, not replay it.
+            let resumed = FlowTable(firstUID: second.highestFlowUID + 1)
+            NMTest.equal(resumed.peekNextUID, 21,
+                         "seeded table would hand out \(resumed.peekNextUID)")
+
+            var more = RecordBatch()
+            for uid in 21...30 {
+                more.conns.append(makeConn(ts: base + Timestamp(uid) * 1000, uid: Int64(uid)))
+            }
+            try await second.write(more)
+            try await second.flush()
+            await second.close()
+
+            let reader = StoreReader(paths: paths)
+            let page = try await reader.connectionRows(QuerySpec(kind: .conn, limit: 100))
+            NMTest.equal(page.rows.count, 30, "restart lost rows: \(page.rows.count) of 30")
+            await reader.close()
+        }
+
+        // The control: without the seed the collision is real, and because a
+        // batch is one transaction it takes the DNS rows written beside it too.
+        await NMTest.test("an unseeded restart loses the whole batch, not just conn") {
+            let root = NSTemporaryDirectory() + "nm-uidc-\(getpid())-\(Int.random(in: 0...9999))"
+            defer { try? FileManager.default.removeItem(atPath: root) }
+            let paths = Paths.temporary(root)
+            let base: Timestamp = 1_789_257_600_000_000
+
+            let first = try StoreWriter(paths: paths)
+            var batch = RecordBatch()
+            for uid in 1...5 { batch.conns.append(makeConn(ts: base + Timestamp(uid) * 1000, uid: Int64(uid))) }
+            try await first.write(batch)
+            try await first.flush()
+            await first.close()
+
+            // Replaying id 1, as an unseeded FlowTable would.
+            let second = try StoreWriter(paths: paths)
+            var replay = RecordBatch()
+            replay.conns.append(makeConn(ts: base + 99_000, uid: 1))
+            var dns = DNSRecord(
+                ts: base + 99_000, proto: 17,
+                clientAddr: IPAddress("192.168.0.31")!, serverAddr: IPAddress("192.168.0.1")!,
+                serverPort: 53, transactionID: 7, query: "collateral.example.com",
+                qtype: 1, answers: ["1.2.3.4"], ttls: [300])
+            dns.rttUs = 1000
+            replay.dns.append(dns)
+
+            var threw = false
+            do { try await second.write(replay) } catch { threw = true }
+            NMTest.expect(threw, "a duplicate flow id was accepted")
+            try? await second.flush()
+            await second.close()
+
+            let reader = StoreReader(paths: paths)
+            let queries = try await reader.dnsQueries(QuerySpec(kind: .dns, limit: 100))
+            NMTest.equal(queries.rows.count, 0,
+                         "the DNS row survived a rolled-back batch, so the transaction is not atomic")
+            await reader.close()
+        }
 
         // The exact situation an existing install is in: meta.db was built by
         // the previous schema, and the daemon is restarted carrying the fix.
