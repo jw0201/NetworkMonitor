@@ -13,5 +13,6 @@ runStreamBufferTests()
 runTLSTests()
 await runRetentionTests()
 await runIPCTests()
+await runStoreReaderTests()
 
 exit(NMTest.finish())
