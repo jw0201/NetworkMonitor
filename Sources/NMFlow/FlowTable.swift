@@ -64,6 +64,17 @@ public struct FlowEntry: Sendable {
     public var serviceHint: String?
     public var anyClamped = false
 
+    /// The name the connecting application asked for, resolved at flow
+    /// creation so it reflects what was known at the moment of connection
+    /// rather than minutes later when the flow closes.
+    public var hostname: String?
+    public var hostnameSource: HostnameSource = .none
+    public var hostnameAmbiguous = false
+    /// Enrichment is attempted at most twice -- once when the flow is created,
+    /// and once more when process attribution latches, since the pid is what
+    /// makes the per-process lookup possible.
+    public var hostnameAttempts: UInt8 = 0
+
     /// pcap ring segment range: two integers instead of a row per packet.
     public var firstSegment: UInt32?
     public var lastSegment: UInt32?

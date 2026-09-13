@@ -24,6 +24,7 @@ public struct EngineStats: Sendable, Equatable {
     public var droppedNoCapacity: Int64 = 0
     public var analyzerInvocations: Int64 = 0
     public var analyzerDetached: Int64 = 0
+    public var hostnamesResolved: Int64 = 0
 }
 
 public final class FlowEngine {
@@ -41,6 +42,10 @@ public final class FlowEngine {
 
     /// Application-layer analyzers, dispatched by protocol and port.
     public let analyzers = AnalyzerRegistry()
+
+    /// Address to name, keyed by requesting process. Fed by analyzers,
+    /// consulted at flow creation.
+    public let hostnames = HostnameCache()
 
     /// Incremented by the capture layer whenever packets are dropped.
     public var lossEpoch: UInt64 = 0
@@ -200,6 +205,11 @@ public final class FlowEngine {
             }
         }
 
+        // Hostname enrichment. Deliberately resolved here rather than at
+        // finalisation: a long-lived flow would otherwise pick up whatever the
+        // cache happened to hold minutes after the connection was made.
+        enrich(slot: slot, now: context.timestamp)
+
         // Application-layer analysis, on payload-bearing packets only.
         if let info = l4, info.payloadLength > 0, !detachedFlows.contains(entry_uid(slot)) {
             runAnalyzer(slot: slot, context: context, l3: l3, l4: info,
@@ -231,7 +241,32 @@ public final class FlowEngine {
         if context.timestamp - lastAnalyzerTick >= Time.microsPerSecond {
             lastAnalyzerTick = context.timestamp
             tickAnalyzers(now: context.timestamp)
+            hostnames.sweep(now: context.timestamp)
         }
+    }
+
+    /// Looks up the responder address, at most twice per flow.
+    private func enrich(slot: Int32, now: Timestamp) {
+        guard let entry = table[slot], entry.hostname == nil,
+              entry.hostnameAttempts < 2 else { return }
+        // Wait for attribution on the first attempt: without a pid the lookup
+        // can only fall back to the wildcard, which is exactly the ambiguity
+        // the per-process key exists to avoid.
+        if entry.hostnameAttempts == 0 && !entry.attributionLatched { return }
+
+        let responder = entry.originatorIsLow ? entry.key.highAddress : entry.key.lowAddress
+        let pid = entry.wasDelegated && entry.effectivePID > 0 ? entry.effectivePID : entry.pid
+        let hit = hostnames.lookup(address: responder, pid: pid, at: now)
+
+        table.withEntry(slot) { e in
+            e.hostnameAttempts += 1
+            if let hit {
+                e.hostname = hit.name
+                e.hostnameSource = hit.source
+                e.hostnameAmbiguous = hit.ambiguous
+            }
+        }
+        if hit != nil { stats.hostnamesResolved += 1 }
     }
 
     private func entry_uid(_ slot: Int32) -> UInt64 {
@@ -259,13 +294,8 @@ public final class FlowEngine {
         stats.analyzerInvocations += 1
         var service: String?
         let verdict = analyzer.analyze(analyzerContext, payload: payload) { output in
-            switch output {
-            case .dns(let record): self.onDNSRecord?(record)
-            case .ssl(let record): self.onSSLRecord?(record)
-            case .service(let name): service = name
-            case .resolvedName(let address, let name, let ttl, let pid):
-                self.onResolvedName?(address, name, ttl, pid)
-            }
+            if case .service(let name) = output { service = name; return }
+            self.handle(output, now: context.timestamp)
         }
 
         if let service {
@@ -285,15 +315,25 @@ public final class FlowEngine {
 
     private func tickAnalyzers(now: Timestamp) {
         analyzers.forEach { analyzer in
-            analyzer.tick(now: now) { output in
-                switch output {
-                case .dns(let record): self.onDNSRecord?(record)
-                case .ssl(let record): self.onSSLRecord?(record)
-                case .service: break
-                case .resolvedName(let address, let name, let ttl, let pid):
-                    self.onResolvedName?(address, name, ttl, pid)
-                }
-            }
+            analyzer.tick(now: now) { output in self.handle(output, now: now) }
+        }
+    }
+
+    /// The single place analyzer output is acted on. Having one handler is what
+    /// stops the cache being fed on the packet path but skipped on the tick and
+    /// flow-close paths.
+    private func handle(_ output: AnalyzerOutput, now: Timestamp) {
+        switch output {
+        case .dns(let record):
+            onDNSRecord?(record)
+        case .ssl(let record):
+            onSSLRecord?(record)
+        case .service:
+            break
+        case .resolvedName(let address, let name, let ttl, let pid):
+            hostnames.insert(address: address, name: name, ttl: ttl,
+                             requestingPID: pid, now: now)
+            onResolvedName?(address, name, ttl, pid)
         }
     }
 
@@ -373,13 +413,7 @@ public final class FlowEngine {
         detachedFlows.remove(entry.uid.raw)
         analyzers.forEach { analyzer in
             analyzer.flowClosed(entry.uid) { output in
-                switch output {
-                case .dns(let record): self.onDNSRecord?(record)
-                case .ssl(let record): self.onSSLRecord?(record)
-                case .service: break
-                case .resolvedName(let address, let name, let ttl, let pid):
-                    self.onResolvedName?(address, name, ttl, pid)
-                }
+                self.handle(output, now: entry.lastSeen)
             }
         }
         if reason == .evictedUnderPressure {
@@ -467,6 +501,9 @@ public final class FlowEngine {
         record.firstPcapSegment = entry.firstSegment
         record.lastPcapSegment = entry.lastSegment
         record.service = entry.serviceHint
+        record.hostname = entry.hostname
+        record.hostnameSource = entry.hostnameSource
+        record.hostnameAmbiguous = entry.hostnameAmbiguous
 
         // The application, not the proxy. A user wants to see "Safari", not
         // "nsurlsessiond" -- but the proxy is preserved alongside rather than

@@ -8,5 +8,6 @@ runPcapRoundTripTests()
 runFlowTests()
 runDNSParserTests()
 runDNSAnalyzerTests()
+runHostnameCacheTests()
 
 exit(NMTest.finish())
