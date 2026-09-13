@@ -520,6 +520,22 @@ review.
 
 ---
 
+## Measurement
+
+### M1. Benchmarks print the machine's load average
+
+A throughput figure without the load beside it is not comparable to anything.
+The flow engine measured 1.02M packets/s on one run and 819k on another, same
+build and same parameters -- the second run had a load average of 17 on an
+8-thread machine, with a Metal shader compiler at 97% CPU and a browser at 40%.
+
+That reads as a 20% regression to investigate, and it was contention. Both
+`--bench` and `--bench-flows` now print cores and load, and say explicitly when
+the machine is busy enough that the figures are a lower bound.
+
+The earlier numbers recorded in this document were taken on a quieter machine
+and should be read as best-case rather than typical.
+
 ## Environment
 
 ### E1. `swift test` does not work

@@ -25,12 +25,20 @@ func runBenchmark(connsPerMinute: Int, seconds: Int) async -> Int32 {
     let root = NSTemporaryDirectory() + "nm-bench-\(getpid())"
     defer { try? FileManager.default.removeItem(atPath: root) }
 
+    // Load is printed because a throughput figure without it is not comparable
+    // to any other run.
+    var loadAverages = [Double](repeating: 0, count: 3)
+    _ = getloadavg(&loadAverages, 3)
+    let cores = ProcessInfo.processInfo.activeProcessorCount
+
     print("""
     NetworkMonitor storage benchmark
     ================================
     target rate    \(fmt(connsPerMinute)) conn rows/minute
     duration       \(seconds)s of simulated traffic
     scratch        \(root)
+    load average   \(String(format: "%.2f", loadAverages[0])) on \(cores) cores\
+    \(loadAverages[0] > Double(cores) / 2 ? "   <- busy; figures are a lower bound" : "")
 
     """)
 

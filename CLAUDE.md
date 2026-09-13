@@ -42,15 +42,24 @@ than adding a contradictory one, and say what new evidence changed it.
 
 ## Build environment constraints
 
-**Command Line Tools only — no Xcode, no Homebrew, no third-party dependencies.**
-This is not incidental; it has shaped several designs:
+**Xcode 26.6 is now installed** (`xcode-select -p` →
+`/Applications/Xcode.app/Contents/Developer`), but the project is deliberately
+still buildable with **Command Line Tools alone**, and takes **no third-party
+dependencies**. Do not introduce a dependency on Xcode-only tooling without a
+specific reason — the constraint is what lets the suite run on a bare machine.
+
+Verified after the switch: clean release build, all 237 tests, and the
+`_Static_assert`s on the PKTAP layout (156 / 280 / 149 / 258) all hold against
+Xcode's SDK.
+
+What the constraint shaped:
 
 | Constraint | Consequence |
 |---|---|
 | `XCTest` and `swift-testing` ship with Xcode, not CLT | **`swift test` does not work.** Tests are an executable built on `Sources/NMTestKit`. |
 | `actool`/`ibtool` refuse to run without Xcode | No asset catalogs. App icon must be a plain `.icns` referenced by `CFBundleIconFile` — *not* `CFBundleIconName`, which needs a compiled catalog and silently yields a generic icon. |
 | No Developer ID | `SMAppService` cannot register the daemon. Install is `sudo Tools/install.sh` (not yet written); XPC peer identity will be pinned by cdhash at install time. |
-| No Instruments | Use `sample`, `spindump`, `fs_usage`, `log stream`, `leaks`. The `--bench*` modes exist because there is no profiler to lean on. |
+| The `--bench*` modes | Written when there was no Instruments. Still the right first stop: they measure the specific things that matter (bytes/row, query plans, flood bounds) rather than a general profile. **They print the load average** — a throughput figure without it is not comparable, and a busy machine has read as a 20% regression before. |
 
 If SwiftUI work starts: `@main` must **not** live in a file named `main.swift`
 (`'main' attribute cannot be used in a module that contains top-level code`),

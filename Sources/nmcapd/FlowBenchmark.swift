@@ -20,11 +20,21 @@ import NMCore
 import NMFlow
 
 func runFlowBenchmark(flows: Int, packets: Int) -> Int32 {
+    // A throughput number without the machine's load beside it is not
+    // comparable to anything. Measured once at 1.02M pps and once at 819k on
+    // the same build -- the second run had a load average of 17 on an 8-thread
+    // machine, so the difference was contention, not a regression. Without the
+    // load printed alongside, that looks like a 20% slowdown to investigate.
+    let load = systemLoad()
     print("""
     NetworkMonitor flow engine benchmark
     ====================================
     concurrent flows   \(formatted(flows))
     packets            \(formatted(packets))
+    cpu cores          \(ProcessInfo.processInfo.activeProcessorCount)
+    load average       \(String(format: "%.2f", load))\
+    \(load > Double(ProcessInfo.processInfo.activeProcessorCount) / 2
+      ? "   <- machine is busy; treat the figures below as a lower bound" : "")
 
     """)
 
@@ -150,6 +160,13 @@ func runFlowBenchmark(flows: Int, packets: Int) -> Int32 {
     """)
 
     return bounded ? 0 : 1
+}
+
+/// One-minute load average.
+private func systemLoad() -> Double {
+    var averages = [Double](repeating: 0, count: 3)
+    guard getloadavg(&averages, 3) > 0 else { return 0 }
+    return averages[0]
 }
 
 private func formatted(_ n: Int) -> String {
