@@ -47,6 +47,10 @@ let package = Package(
         // them above NMFlow would make the dependency circular.
         .target(name: "NMFlow", dependencies: ["NMCore"], swiftSettings: strict),
 
+        // Application-layer analyzers. Depends on NMFlow for the L3/L4 types,
+        // never the other way round.
+        .target(name: "NMAnalyzers", dependencies: ["NMCore", "NMFlow"], swiftSettings: strict),
+
         // Storage: schema, the single-writer actor, rollups, retention.
         .target(name: "NMStore", dependencies: ["NMCore"], swiftSettings: strict),
 
@@ -56,7 +60,7 @@ let package = Package(
 
         .executableTarget(
             name: "nmcapd",
-            dependencies: ["NMCapture", "NMCore", "NMFlow", "NMSource", "NMStore"],
+            dependencies: ["NMAnalyzers", "NMCapture", "NMCore", "NMFlow", "NMSource", "NMStore"],
             swiftSettings: strict
         ),
 
@@ -66,7 +70,7 @@ let package = Package(
         .target(name: "NMTestKit", swiftSettings: strict),
         .executableTarget(
             name: "nmtest",
-            dependencies: ["NMTestKit", "NMCore", "NMCapture", "NMFlow", "NMSource", "NMStore"],
+            dependencies: ["NMTestKit", "NMAnalyzers", "NMCore", "NMCapture", "NMFlow", "NMSource", "NMStore"],
             swiftSettings: strict
         ),
     ]

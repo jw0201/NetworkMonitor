@@ -6,5 +6,6 @@ runIPAddressTests()
 runPktapDecoderTests()
 runPcapRoundTripTests()
 runFlowTests()
+runDNSParserTests()
 
 exit(NMTest.finish())
