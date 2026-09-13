@@ -22,6 +22,8 @@ public struct EngineStats: Sendable, Equatable {
     public var unattributed: Int64 = 0
     public var recordsEmitted: Int64 = 0
     public var droppedNoCapacity: Int64 = 0
+    public var analyzerInvocations: Int64 = 0
+    public var analyzerDetached: Int64 = 0
 }
 
 public final class FlowEngine {
@@ -31,11 +33,23 @@ public final class FlowEngine {
 
     /// Called for every finalised flow. The engine knows nothing about storage.
     public var onConnectionRecord: ((ConnRecord, FlowEndReason) -> Void)?
+    /// Application-layer records produced by analyzers.
+    public var onDNSRecord: ((DNSRecord) -> Void)?
+    public var onSSLRecord: ((SSLRecord) -> Void)?
+    /// A hostname learned for an address. Wired to the enrichment cache.
+    public var onResolvedName: ((IPAddress, String, UInt32, Int32) -> Void)?
+
+    /// Application-layer analyzers, dispatched by protocol and port.
+    public let analyzers = AnalyzerRegistry()
 
     /// Incremented by the capture layer whenever packets are dropped.
     public var lossEpoch: UInt64 = 0
 
     private var lastExpiryCheck: Timestamp = 0
+    private var lastAnalyzerTick: Timestamp = 0
+    /// Flows an analyzer has detached from, so a `notMine` verdict is not
+    /// re-evaluated on every subsequent packet of the same flow.
+    private var detachedFlows: Set<UInt64> = []
 
     /// Shed flows are aggregated rather than emitted individually.
     ///
@@ -186,6 +200,14 @@ public final class FlowEngine {
             }
         }
 
+        // Application-layer analysis, on payload-bearing packets only.
+        if let info = l4, info.payloadLength > 0, !detachedFlows.contains(entry_uid(slot)) {
+            runAnalyzer(slot: slot, context: context, l3: l3, l4: info,
+                        reader: reader, fromOriginator: fromOriginator,
+                        key: key, sourcePort: sourcePort,
+                        destinationPort: destinationPort)
+        }
+
         stats.bytes += Int64(l3.ipBytes)
         table.touch(slot, now: context.timestamp)
 
@@ -206,12 +228,86 @@ public final class FlowEngine {
             lastExpiryCheck = context.timestamp
             table.expire(now: context.timestamp) { entry, reason in self.emit(entry, reason) }
         }
+        if context.timestamp - lastAnalyzerTick >= Time.microsPerSecond {
+            lastAnalyzerTick = context.timestamp
+            tickAnalyzers(now: context.timestamp)
+        }
+    }
+
+    private func entry_uid(_ slot: Int32) -> UInt64 {
+        table[slot]?.uid.raw ?? 0
+    }
+
+    private func runAnalyzer(slot: Int32, context: PacketContext,
+                             l3: L3Info, l4: L4Info, reader: ByteReader,
+                             fromOriginator: Bool, key: FlowKey,
+                             sourcePort: UInt16, destinationPort: UInt16) {
+        guard let analyzer = analyzers.analyzer(proto: l3.proto,
+                                                sourcePort: sourcePort,
+                                                destinationPort: destinationPort) else { return }
+        guard let entry = table[slot] else { return }
+        guard let payload = try? reader.reader(at: l4.payloadOffset,
+                                               count: l4.payloadLength) else { return }
+
+        let analyzerContext = AnalyzerContext(
+            flowUID: entry.uid, key: key, packet: context,
+            fromOriginator: fromOriginator,
+            sourceAddress: l3.source, sourcePort: sourcePort,
+            destinationAddress: l3.destination, destinationPort: destinationPort,
+            proto: l3.proto)
+
+        stats.analyzerInvocations += 1
+        var service: String?
+        let verdict = analyzer.analyze(analyzerContext, payload: payload) { output in
+            switch output {
+            case .dns(let record): self.onDNSRecord?(record)
+            case .ssl(let record): self.onSSLRecord?(record)
+            case .service(let name): service = name
+            case .resolvedName(let address, let name, let ttl, let pid):
+                self.onResolvedName?(address, name, ttl, pid)
+            }
+        }
+
+        if let service {
+            table.withEntry(slot) { $0.serviceHint = service }
+        }
+
+        switch verdict {
+        case .notMine, .satisfied, .failed:
+            // Detaching is per flow and permanent. Re-running a misidentified
+            // analyzer on every packet of a long flow would be pure waste.
+            stats.analyzerDetached += 1
+            if detachedFlows.count < 65_536 { detachedFlows.insert(entry.uid.raw) }
+        case .wantMore:
+            break
+        }
+    }
+
+    private func tickAnalyzers(now: Timestamp) {
+        analyzers.forEach { analyzer in
+            analyzer.tick(now: now) { output in
+                switch output {
+                case .dns(let record): self.onDNSRecord?(record)
+                case .ssl(let record): self.onSSLRecord?(record)
+                case .service: break
+                case .resolvedName(let address, let name, let ttl, let pid):
+                    self.onResolvedName?(address, name, ttl, pid)
+                }
+            }
+        }
     }
 
     /// Finalises everything still open. For shutdown and for tests.
     public func flush() {
         table.drain { entry, reason in self.emit(entry, reason) }
         flushEvictionAggregates()
+        detachedFlows.removeAll(keepingCapacity: true)
+    }
+
+    /// Drives analyzer maintenance without a packet to trigger it, so an
+    /// unanswered DNS query is reported even if traffic stops entirely.
+    public func tick(now: Timestamp) {
+        tickAnalyzers(now: now)
     }
 
     /// Emits the accumulated shed-flow summaries.
@@ -274,6 +370,18 @@ public final class FlowEngine {
     // MARK: - Record emission
 
     private func emit(_ entry: FlowEntry, _ reason: FlowEndReason) {
+        detachedFlows.remove(entry.uid.raw)
+        analyzers.forEach { analyzer in
+            analyzer.flowClosed(entry.uid) { output in
+                switch output {
+                case .dns(let record): self.onDNSRecord?(record)
+                case .ssl(let record): self.onSSLRecord?(record)
+                case .service: break
+                case .resolvedName(let address, let name, let ttl, let pid):
+                    self.onResolvedName?(address, name, ttl, pid)
+                }
+            }
+        }
         if reason == .evictedUnderPressure {
             aggregateEviction(entry)
             return

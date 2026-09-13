@@ -7,5 +7,6 @@ runPktapDecoderTests()
 runPcapRoundTripTests()
 runFlowTests()
 runDNSParserTests()
+runDNSAnalyzerTests()
 
 exit(NMTest.finish())
