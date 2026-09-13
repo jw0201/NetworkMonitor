@@ -9,9 +9,36 @@ configurable retention, a live SwiftUI dashboard, and raw record / packet
 browsing. Early stage — the capture, flow-tracking and storage layers exist and
 are verified; the analyzers, IPC and UI do not yet.
 
-The design document lives at `~/.claude/plans/elegant-churning-diffie.md`. It
-records *why* each decision was made and which of them were later reversed by
-measurement. Read it before making architectural changes.
+## Documentation map
+
+| Document | Audience | Purpose |
+|---|---|---|
+| **this file** | future Claude Code sessions | working agreements, traps, where things live |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | developers and users | what each layer does, data flow, current status |
+| [`docs/DECISIONS.md`](docs/DECISIONS.md) | anyone changing a decision | why, with evidence; **REVERSED** entries are the ones most likely to be wrongly "corrected" back |
+| `README.md` | first-time reader | orientation and the build constraints |
+| `~/.claude/plans/elegant-churning-diffie.md` | historical | the original design, including parts measurement later overturned |
+
+## Working agreement on documentation
+
+**Any decision about a layer, a boundary, or an analysis approach must be
+recorded before the work is considered done.** Not "should be" — this is the
+mechanism that keeps the project coherent across sessions, and an undocumented
+decision reliably gets reversed by the next person who reads only the upstream
+spec.
+
+Specifically:
+
+- A new layer, module, or moved boundary → update `docs/ARCHITECTURE.md`
+- A decision with a non-obvious reason, or one that contradicts documentation
+  or an earlier plan → add an entry to `docs/DECISIONS.md`, **with the evidence**
+  (a measurement, a query plan, a failing test, a cross-check against another
+  tool — not an assertion)
+- A trap that would cost the next session time → add it here
+- Anything measured → record the number, not the adjective
+
+If a change reverses something already in `DECISIONS.md`, edit that entry rather
+than adding a contradictory one, and say what new evidence changed it.
 
 ## Build environment constraints
 
@@ -264,6 +291,28 @@ deliberate and should not be "simplified away":
   the real destination. The UI must say "encrypted" / flag `sniIsOuter` rather
   than showing a confident wrong hostname.
 
+## Retention and partitioning
+
+Retention is `unlink()` on a day file. That is the reason the store is split at
+all — see DECISIONS.md S8 for what the single-database alternative costs.
+
+- The writer's **current day comes from the data, not the clock**. Taking it from
+  the wall clock meant replaying an old capture rotated on the first write.
+- Rotation is `rename()`; sealing then sets `journal_mode=DELETE` (so the archive
+  has no `-wal`/`-shm` at all), builds extra read indices, and `VACUUM INTO`s a
+  sibling before swapping.
+- Three expiry shapes: past every retention → `unlink` without opening; in the
+  mixed band → opened once to drop expired tables; rollups/alerts expire by row.
+- Defaults are **tiered, not flat**: at 50k rows/min a flat 30-day raw retention
+  needs ~580 GB.
+- Day arithmetic is integer (Howard Hinnant's algorithm), never a date formatter
+  — retention must not depend on locale or time zone.
+- Rotating twice in one day appends a suffix rather than overwriting. An archive
+  whose name does not parse as a date is reported and **never deleted on a guess**.
+
+Inspect with `nmcapd --store-info <dir>`; it is a dry report unless
+`--run-retention` is passed.
+
 ## Storage
 
 Measured on this machine with `--bench`, not estimated:
@@ -330,6 +379,7 @@ Swift 6 language mode on every target.
 | PKTAP decode | Verified against live kernel output and Apple's tcpdump |
 | Flow tracking | 1.02M pps steady; bounded at capacity under SYN flood |
 | Storage | Benchmarked to 60k rows/s; schema and query plans measured |
+| Retention / rotation / seal | Day arithmetic, mixed band, pcap budget covered |
 | DNS parsing + analysis | Fuzzed in release; compression attacks covered |
 | Hostname enrichment | Per-process cache verified against the shared-CDN case |
 | TCP reassembly | Overlap, gap and sequence-wrap cases covered |

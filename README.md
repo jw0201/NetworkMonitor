@@ -16,6 +16,15 @@ no NetworkExtension entitlement, and it is what lets the DNS answer cache be
 keyed by `(requesting pid, IP)` rather than by IP alone -- which resolves the
 CDN shared-address ambiguity that defeats IP-only tools.
 
+## Documentation
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — what each layer does, how data
+  flows through it, and what is built so far
+- [`docs/DECISIONS.md`](docs/DECISIONS.md) — why, with the evidence. Several
+  entries reverse what the original design said; those carry the measurement
+  that changed it
+- `CLAUDE.md` — working agreements for automated sessions
+
 ## Build constraints
 
 This project builds with **Command Line Tools only** -- no Xcode, no Homebrew,
