@@ -19,6 +19,10 @@ PLIST="/Library/LaunchDaemons/${DAEMON_ID}.plist"
 LOG_DIR="/var/log/networkmonitor"
 RIGHT="com.narusec.networkmonitor.admin"
 APP="/Applications/NetworkMonitor.app"
+# Must match install.sh and bundle.sh. Its absence here aborted the script under
+# `set -u` at the per-user preferences loop -- before the group, the log
+# directory and the whole --purge-data section had run.
+APP_ID="com.narusec.NetworkMonitor"
 
 say() { printf '  %s\n' "$*"; }
 
@@ -107,7 +111,7 @@ rm -rf "$LOG_DIR"
 echo
 if [ -d "$DATA_ROOT/db" ]; then
     SIZE=$(du -sh "$DATA_ROOT" 2>/dev/null | cut -f1)
-    DAYS=$(ls "$DATA_ROOT/db/archive" 2>/dev/null | grep -c '\.db$' || echo 0)
+    DAYS=$(ls "$DATA_ROOT/db/archive" 2>/dev/null | grep -c '\.db$')
 
     if [ "$PURGE" = true ]; then
         echo "Captured data: $SIZE across $DAYS archived day(s) plus today."

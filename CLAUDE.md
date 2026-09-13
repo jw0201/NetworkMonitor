@@ -534,6 +534,17 @@ and issues `defaults delete` as well as unlinking the plist: `cfprefsd` caches
 preferences in memory and rewrites the file on exit otherwise, so deleting the
 file alone leaves them behind.
 
+**The scripts run under `set -u`, so one undefined variable silently truncates
+the run.** `uninstall.sh` referenced `APP_ID` without defining it (`install.sh`
+and `bundle.sh` both do). The shell exited at the per-user preferences loop —
+after removing the daemon, plist and app, but before the group, the log
+directory and the entire `--purge-data` section. It reported the removals it
+had already made and then stopped, so the output looked like a partial success
+rather than a failure. `bash -n` does not catch this; only running the script
+does. Exercise the destructive paths against a sandbox root (retarget the
+`DATA_ROOT`/`PLIST`/`APP` constants with `sed`, stub `launchctl`/`security`/
+`dscl` on `PATH`) rather than reasoning about them.
+
 **The daemon binary must not live inside the .app.** `/Applications` is
 `root:admin 0775` — group-writable by non-root — and launchd refuses to run a
 daemon whose binary or plist is writable by anyone but root. The error is
