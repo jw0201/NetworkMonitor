@@ -396,6 +396,63 @@ func runStoreReaderTests() async {
 func runAttributionTests() async {
     await NMTest.suite("Attribution / end to end") {
 
+        // The exact situation an existing install is in: meta.db was built by
+        // the previous schema, and the daemon is restarted carrying the fix.
+        await NMTest.test("an existing meta.db is migrated off the v1 exec index") {
+            let root = NSTemporaryDirectory() + "nm-mig-\(getpid())-\(Int.random(in: 0...9999))"
+            defer { try? FileManager.default.removeItem(atPath: root) }
+            let paths = Paths.temporary(root)
+
+            // Build the tree, then put meta.db back to the v1 index by hand.
+            await (try StoreWriter(paths: paths)).close()
+            do {
+                let side = try SQLiteConnection(path: paths.metaDatabase)
+                try side.exec("""
+                    DROP INDEX ux_exec_ident;
+                    CREATE UNIQUE INDEX ux_exec_ident ON exec(path, uuid_hi, uuid_lo);
+                    """)
+                // Stamped current even though the index is old -- what a restart
+                // on the fixed build actually leaves behind, and the reason the
+                // migration reads the index instead of the stamp.
+                try side.exec("PRAGMA user_version = \(Schema.version)")
+                side.close()
+            }
+
+            // Opening a writer must repair it.
+            let writer = try StoreWriter(paths: paths)
+            let base: Timestamp = 1_789_257_600_000_000
+            var batch = RecordBatch()
+            // No path and no UUID: identical under the v1 key, distinct under v2.
+            for (index, name) in ["Google Chrome Helper", "Aside Helper"].enumerated() {
+                var record = DNSRecord(
+                    ts: base + Timestamp(index) * 1000, proto: 17,
+                    clientAddr: IPAddress("192.168.0.31")!,
+                    serverAddr: IPAddress("192.168.0.1")!,
+                    serverPort: 53, transactionID: UInt16(index),
+                    query: "host\(index).example.com", qtype: 1,
+                    answers: ["1.2.3.\(index + 1)"], ttls: [300])
+                record.rttUs = 1000
+                record.exec = ExecInfo(path: "", name: name, uuidHi: 0, uuidLo: 0)
+                batch.dns.append(record)
+            }
+            try await writer.write(batch)
+            try await writer.flush()
+            await writer.close()
+
+            let check = try SQLiteConnection(path: paths.metaDatabase)
+            let columns = try check.scalarInt(
+                "SELECT count(*) FROM pragma_index_info('ux_exec_ident')") ?? 0
+            NMTest.equal(columns, 4, "exec index still has \(columns) columns")
+            check.close()
+
+            let reader = StoreReader(paths: paths)
+            let page = try await reader.dnsQueries(QuerySpec(kind: .dns, limit: 100))
+            let names = Set(page.rows.compactMap(\.processName))
+            NMTest.equal(names.count, 2,
+                         "identities merged after migration: \(names)")
+            await reader.close()
+        }
+
         await NMTest.test("processes with no path stay distinct") {
             let root = NSTemporaryDirectory() + "nm-attr-\(getpid())-\(Int.random(in: 0...9999))"
             defer { try? FileManager.default.removeItem(atPath: root) }

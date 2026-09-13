@@ -467,6 +467,7 @@ public enum Schema {
 
     public static func createMeta(_ db: SQLiteConnection) throws {
         try db.exec(metaDDL)
+        try migrateMeta(db)
         try db.exec("PRAGMA user_version = \(version)")
     }
 
@@ -478,6 +479,47 @@ public enum Schema {
     public static func createPcapIndex(_ db: SQLiteConnection) throws {
         try db.exec(pcapDDL)
         try db.exec("PRAGMA user_version = \(version)")
+    }
+
+    // MARK: - Migration
+
+    /// Brings an existing `meta.db` up to `version`.
+    ///
+    /// **`user_version` cannot be the signal here, and that is the whole
+    /// reason this function inspects the file instead.** Every `create*`
+    /// stamps the current version after running DDL built from
+    /// `CREATE ... IF NOT EXISTS`, and that form does *not* replace an object
+    /// whose definition changed. A file carrying the v1 index therefore gets
+    /// stamped v2 and then reports itself migrated -- so any machine that
+    /// restarted the daemon after the schema bump already has a stamp that
+    /// lies. Reading what is actually on disk is the only check that survives
+    /// that, and it makes the migration idempotent for free.
+    static func migrateMeta(_ db: SQLiteConnection) throws {
+        try migrateExecIdentity(db)
+    }
+
+    /// v1 -> v2: the exec identity index gained `name`.
+    ///
+    /// Analyzer-produced identities carry neither a path nor a UUID, so under
+    /// the three-column index every one of them collided on `("", 0, 0)` and
+    /// inherited the name of whichever process was interned first. Widening a
+    /// unique index can never fail against existing rows: anything unique on
+    /// three columns is still unique on four.
+    ///
+    /// This repairs **future writes only**. Rows already written point at the
+    /// merged `exec` row, and the identity that lost the collision was never
+    /// stored anywhere, so it cannot be recovered. `dns.pid` and `ssl.pid` are
+    /// unaffected and are the only sound basis for re-attributing old rows.
+    private static func migrateExecIdentity(_ db: SQLiteConnection) throws {
+        let columns = try db.scalarInt(
+            "SELECT count(*) FROM pragma_index_info('ux_exec_ident')") ?? 0
+        // 0 means the index is absent, which cannot happen after the DDL above
+        // and must not be "repaired" by guessing. 4 is current.
+        guard columns > 0, columns < 4 else { return }
+        try db.exec("""
+            DROP INDEX ux_exec_ident;
+            CREATE UNIQUE INDEX ux_exec_ident ON exec(path, uuid_hi, uuid_lo, name);
+            """)
     }
 
     /// Reads the stored schema version, or 0 for a fresh file.

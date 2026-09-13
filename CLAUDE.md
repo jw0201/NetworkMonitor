@@ -394,6 +394,33 @@ all — see DECISIONS.md S8 for what the single-database alternative costs.
 Inspect with `nmcapd --store-info <dir>`; it is a dry report unless
 `--run-retention` is passed.
 
+## Schema changes: `IF NOT EXISTS` does not migrate
+
+**`CREATE ... IF NOT EXISTS` does not replace an object whose definition
+changed, and every `create*` stamps `PRAGMA user_version` afterwards
+regardless.** So bumping `Schema.version` and editing the DDL silently does
+nothing to an existing file, which then reports itself as current. `user_version`
+on any store that was opened between the bump and the migration is a stamp that
+lies, and no migration may trust it.
+
+This was not theoretical. The v2 exec index change left existing installs in a
+state where `ON CONFLICT (path, uuid_hi, uuid_lo, name)` matched no unique
+index, so **every `exec` insert failed to prepare** — the daemon would not have
+mislabelled processes, it would have stopped recording them.
+
+Consequences for any future schema change:
+
+- Add a step to `Schema.migrateMeta` (or a sibling for the other file kinds)
+  that **inspects what is on disk** — `pragma_index_info`, `pragma_table_info`
+  — rather than branching on `user_version`. That also makes it idempotent.
+- Reinstalling is **not** a migration. `Tools/uninstall.sh` keeps captured data
+  by design, and `meta.db` never rotates (only `live.db` does), so neither
+  reinstalling nor waiting for midnight touches it.
+- A migration repairs future writes. It cannot recover data already collapsed
+  by the old constraint — for the exec case the losing identity was never
+  stored. `dns.pid` / `ssl.pid` survive and are the only sound basis for
+  re-attributing historical rows.
+
 ## Storage
 
 Measured on this machine with `--bench`, not estimated:
@@ -475,8 +502,8 @@ Both outstanding probes have now been checked against live capture:
 - **P5 (`pth_epid` on DNS): the packets are fine, the pipeline was not.** See
   DECISIONS S12. `conn` recorded 819 DNS flows from Chrome while `dns` showed
   none, because every analyzer-produced `ExecInfo` had no path and no UUID and
-  so interned to a single `exec` row. Fixed in schema v2; **an existing install
-  must be reinstalled to pick it up.**
+  so interned to a single `exec` row. Fixed in schema v2, with a migration —
+  see the trap below, because reinstalling does **not** fix an existing store.
 
 The lesson generalises: every layer passed its own tests, and the failure lived
 only at the boundary between them. Query real captured data and check that

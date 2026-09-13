@@ -574,6 +574,27 @@ disagreed about the same traffic.
 > Verification probes are worth running against real data even when every
 > component is tested.
 
+Widening the index is only half the fix, because **changing DDL does not
+migrate anything**. `CREATE UNIQUE INDEX IF NOT EXISTS` leaves the old
+three-column index in place on an existing file, and `create*` stamps
+`PRAGMA user_version` regardless, so the file claims to be current. The result
+was worse than a wrong label: `ON CONFLICT (path, uuid_hi, uuid_lo, name)`
+matches no unique index on such a file, so every `exec` insert fails to
+prepare and the daemon stops recording process identity altogether.
+
+`Schema.migrateMeta` therefore rebuilds the index after inspecting
+`pragma_index_info`, **not** after reading `user_version` — the stamp on any
+store opened between the bump and the migration is known to lie, and reading
+the file is idempotent besides. Widening a unique index cannot fail against
+existing rows: anything unique on three columns is still unique on four.
+
+Reinstalling is not a migration. `uninstall.sh` keeps captured data by design
+and `meta.db` never rotates, so the only alternatives were an explicit
+migration or `--purge-data`. The migration repairs future writes; rows already
+written keep pointing at the merged `exec` row, and the identity that lost the
+collision was never stored, so it is gone. `dns.pid` and `ssl.pid` are
+unaffected.
+
 ### S13. Verified against live capture: loopback double-tap (P4)
 
 The design assumes the kernel taps a loopback packet twice — once outbound at
