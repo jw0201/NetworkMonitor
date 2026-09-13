@@ -560,7 +560,50 @@ Plain `-k` prints everything.
 
 ---
 
-## 12. Status
+## 12. Installing and removing
+
+```bash
+sudo Tools/install.sh                      # bundle.sh must have run first
+sudo Tools/uninstall.sh                    # keeps captured data
+sudo Tools/uninstall.sh --purge-data       # asks, then deletes it
+sudo Tools/uninstall.sh --purge-data --yes # for scripts
+```
+
+### What install places
+
+| Path | Owner / mode | Note |
+|---|---|---|
+| `/usr/local/libexec/nmcapd` | `root:wheel 0755` | **not** inside the `.app` — launchd refuses a daemon writable by non-root, and `/Applications` is `root:admin 0775` |
+| `/Library/LaunchDaemons/com.narusec.…plist` | `root:wheel 0644` | `ProcessType = Adaptive`, never `Background` |
+| `/Applications/NetworkMonitor.app` | `root:admin` | |
+| `…/NetworkMonitor/db/` | `root:_networkmonitor 0770` | 0770 so a reader can create `-shm` when the daemon is down |
+| `…/NetworkMonitor/peers.plist` | `root:wheel 0644` | both cdhashes, resolved at install |
+| `/var/log/networkmonitor/` | `root:wheel 0750` | |
+
+Plus a `_networkmonitor` group (with `$SUDO_USER` added) and an authorization
+right `com.narusec.networkmonitor.admin`.
+
+### What uninstall removes
+
+Everything above **except the captured data**, which is kept unless
+`--purge-data` is given — and it asks even then. Deleting a month of forensic
+records should not be a side effect of removing software, and it may be exactly
+what someone is uninstalling in order to go and inspect.
+
+Per-user preferences are removed from *every* account that opened the app, not
+just the one running the uninstall. `defaults delete` is issued as well as
+deleting the plist, because `cfprefsd` caches preferences in memory and rewrites
+the file on exit otherwise.
+
+Removing the data removes the SQLite files completely — the `-wal` and `-shm`
+sidecars, every sealed day partition under `db/archive/`, and the pcap ring —
+because the whole directory tree goes. There is nothing kept outside it.
+
+The script finishes by naming anything still on disk rather than assuming. A
+tool that reports success while leaving files behind is why people distrust
+uninstallers.
+
+## 13. Status
 
 | Layer | State |
 |---|---|

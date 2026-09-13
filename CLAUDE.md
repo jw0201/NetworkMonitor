@@ -486,8 +486,17 @@ install rather than needing a special capture.
 /var/log/networkmonitor/nmcapd.err
 ```
 
-`sudo Tools/install.sh` / `sudo Tools/uninstall.sh [--purge-data]`. Uninstall
-keeps captured data unless `--purge-data`, and asks even then.
+`sudo Tools/install.sh` / `sudo Tools/uninstall.sh [--purge-data] [--yes]`.
+
+Uninstall keeps captured data unless `--purge-data`, and asks even then; with no
+terminal to ask on it **keeps** the data rather than guessing. Removing the data
+removes the SQLite files whole — `-wal`/`-shm` sidecars, sealed archives, the
+pcap ring — since the entire tree goes.
+
+It also clears per-user preferences from **every** account that opened the app,
+and issues `defaults delete` as well as unlinking the plist: `cfprefsd` caches
+preferences in memory and rewrites the file on exit otherwise, so deleting the
+file alone leaves them behind.
 
 **The daemon binary must not live inside the .app.** `/Applications` is
 `root:admin 0775` — group-writable by non-root — and launchd refuses to run a

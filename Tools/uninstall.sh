@@ -20,10 +20,29 @@ LOG_DIR="/var/log/networkmonitor"
 RIGHT="com.narusec.networkmonitor.admin"
 APP="/Applications/NetworkMonitor.app"
 
-PURGE=false
-[ "${1:-}" = "--purge-data" ] && PURGE=true
-
 say() { printf '  %s\n' "$*"; }
+
+# Arguments are parsed before the root check, so --help works without sudo.
+PURGE=false
+ASSUME_YES=false
+for arg in "$@"; do
+    case "$arg" in
+        --purge-data) PURGE=true ;;
+        --yes|-y) ASSUME_YES=true ;;
+        -h|--help)
+            cat <<USAGE
+Usage: sudo Tools/uninstall.sh [--purge-data] [--yes]
+
+  --purge-data   also delete the captured logs and packet data
+  --yes          do not prompt (for scripts; only deletes with --purge-data)
+
+Without --purge-data the captured data is left in place. Deleting a month of
+records is not something to do as a side effect of removing software.
+USAGE
+            exit 0 ;;
+        *) echo "unknown option: $arg (try --help)" >&2; exit 2 ;;
+    esac
+done
 
 [ "$(id -u)" -eq 0 ] || { echo "error: must run as root" >&2; exit 1; }
 
@@ -53,6 +72,30 @@ fi
 
 rm -f "$DATA_ROOT/peers.plist" && say "peer pinning"
 
+# Per-user preferences. Small, but they live in every account that ever opened
+# the app, so leaving them means the software is not really gone -- and a
+# reinstall would silently inherit stale display settings.
+for HOME_DIR in /Users/*; do
+    [ -d "$HOME_DIR" ] || continue
+    USER_NAME=$(basename "$HOME_DIR")
+    REMOVED=false
+    for LEFTOVER in \
+        "$HOME_DIR/Library/Preferences/${APP_ID}.plist" \
+        "$HOME_DIR/Library/Caches/${APP_ID}" \
+        "$HOME_DIR/Library/Saved Application State/${APP_ID}.savedState" \
+        "$HOME_DIR/Library/HTTPStorages/${APP_ID}" \
+        "$HOME_DIR/Library/WebKit/${APP_ID}"
+    do
+        if [ -e "$LEFTOVER" ]; then rm -rf "$LEFTOVER"; REMOVED=true; fi
+    done
+    # cfprefsd holds preferences in memory and rewrites the file on exit unless
+    # it is told to forget them, so deleting the plist alone is not enough.
+    if [ "$REMOVED" = true ]; then
+        sudo -u "$USER_NAME" defaults delete "$APP_ID" 2>/dev/null || true
+        say "preferences for $USER_NAME"
+    fi
+done
+
 if dscl . -read "/Groups/$GROUP" >/dev/null 2>&1; then
     dseditgroup -o delete -q "$GROUP" 2>/dev/null && say "$GROUP group"
 fi
@@ -68,12 +111,25 @@ if [ -d "$DATA_ROOT/db" ]; then
 
     if [ "$PURGE" = true ]; then
         echo "Captured data: $SIZE across $DAYS archived day(s) plus today."
-        printf "Delete it permanently? [y/N] "
-        read -r REPLY </dev/tty
-        case "$REPLY" in
-            [yY]*) rm -rf "$DATA_ROOT"; say "deleted" ;;
-            *) say "kept at $DATA_ROOT" ;;
-        esac
+        CONFIRMED=false
+        if [ "$ASSUME_YES" = true ]; then
+            CONFIRMED=true
+        elif [ -e /dev/tty ]; then
+            printf "Delete it permanently? [y/N] "
+            read -r REPLY </dev/tty 2>/dev/null || REPLY=""
+            case "$REPLY" in [yY]*) CONFIRMED=true ;; esac
+        else
+            # Nowhere to ask. Keeping the data is the safe default; a script
+            # that meant to delete it can pass --yes.
+            say "no terminal to confirm on; keeping the data (pass --yes to delete)"
+        fi
+
+        if [ "$CONFIRMED" = true ]; then
+            rm -rf "$DATA_ROOT"
+            say "deleted $SIZE"
+        else
+            say "kept at $DATA_ROOT"
+        fi
     else
         cat <<EOF
 Captured data kept: $SIZE across $DAYS archived day(s).
@@ -89,4 +145,21 @@ EOF
 fi
 
 echo
-echo "Uninstalled."
+if [ -d "$DATA_ROOT" ]; then
+    echo "Uninstalled. Captured data kept at:"
+    echo "  $DATA_ROOT"
+else
+    echo "Uninstalled. Nothing left behind."
+fi
+
+# Name whatever is still on disk rather than assuming. A tool that reports
+# success while leaving files around is why people distrust uninstallers.
+LEFT=""
+for TARGET in "$PLIST" "$LIBEXEC/nmcapd" "$APP" "$LOG_DIR"; do
+    [ -e "$TARGET" ] && LEFT="$LEFT
+  $TARGET"
+done
+if [ -n "$LEFT" ]; then
+    echo
+    echo "Still present, remove by hand:$LEFT"
+fi
