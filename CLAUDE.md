@@ -1,0 +1,252 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this is
+
+A macOS network monitor: Zeek-style per-protocol logging, a storage layer with
+configurable retention, a live SwiftUI dashboard, and raw record / packet
+browsing. Early stage — the capture, flow-tracking and storage layers exist and
+are verified; the analyzers, IPC and UI do not yet.
+
+The design document lives at `~/.claude/plans/elegant-churning-diffie.md`. It
+records *why* each decision was made and which of them were later reversed by
+measurement. Read it before making architectural changes.
+
+## Build environment constraints
+
+**Command Line Tools only — no Xcode, no Homebrew, no third-party dependencies.**
+This is not incidental; it has shaped several designs:
+
+| Constraint | Consequence |
+|---|---|
+| `XCTest` and `swift-testing` ship with Xcode, not CLT | **`swift test` does not work.** Tests are an executable built on `Sources/NMTestKit`. |
+| `actool`/`ibtool` refuse to run without Xcode | No asset catalogs. App icon must be a plain `.icns` referenced by `CFBundleIconFile` — *not* `CFBundleIconName`, which needs a compiled catalog and silently yields a generic icon. |
+| No Developer ID | `SMAppService` cannot register the daemon. Install is `sudo Tools/install.sh` (not yet written); XPC peer identity will be pinned by cdhash at install time. |
+| No Instruments | Use `sample`, `spindump`, `fs_usage`, `log stream`, `leaks`. The `--bench*` modes exist because there is no profiler to lean on. |
+
+If SwiftUI work starts: `@main` must **not** live in a file named `main.swift`
+(`'main' attribute cannot be used in a module that contains top-level code`),
+and `Info.plist` needs `NSPrincipalClass = NSApplication` or AppKit will not
+initialize the app properly.
+
+## Commands
+
+```bash
+swift build                      # debug
+swift build -c release           # release — use this for any benchmark
+swift run nmtest                 # the whole test suite (94 tests). NOT `swift test`.
+```
+
+There is no per-test filter. To run a subset, comment out the `run*Tests()`
+calls in `Sources/nmtest/main.swift`.
+
+Everything below runs **without root**:
+
+```bash
+.build/debug/nmcapd --layout                     # compiled-in struct layout
+.build/debug/nmcapd --make-fixture /tmp/f.pcap 200
+.build/debug/nmcapd --replay /tmp/f.pcap         # decode, print pktap fields
+.build/debug/nmcapd --flows-file /tmp/f.pcap     # conn.log-style output
+.build/release/nmcapd --bench-flows 4000 2000000 # flow engine throughput + flood bound
+.build/release/nmcapd --bench 50000 600          # storage: rows/s, bytes/row, dbstat, query plans
+tcpdump -r /tmp/f.pcap -k -n                     # Apple's decoder on the same file
+```
+
+These need root, and **Claude Code's `!` prefix has no TTY so `sudo` cannot
+prompt there** — ask the user to run them in a normal Terminal window:
+
+```bash
+sudo Tools/verify-pktap.sh 20     # tees a transcript to ./verify-pktap.log, which IS readable
+sudo .build/release/nmcapd --flows 20
+sudo .build/release/nmcapd --self-test 20
+```
+
+`tcpdump -k` takes an **optional** argument: `-k NPID` makes getopt treat `NPID`
+as the filter expression, and the only valid metadata characters are `INPSDCFU`
+(a stray `D` is parsed as `-D` and lists interfaces). Plain `-k` prints
+everything and is what you want.
+
+## Architecture
+
+```
+CPktap          C shim: hand-declared struct pktap_header + Apple's real pcap headers
+  └ NMCore      ByteReader, IPAddress/IPPrefix, records, Timestamp, Paths, Limits
+      ├ NMCapture   pcap handle, PKTAP decode, pcap file read/write   [root-only surface]
+      ├ NMFlow      L3/L4 parsers, FlowKey, FlowTable, TCPStateMachine, FlowEngine
+      ├ NMStore     SQLite wrapper, schema, StoreWriter actor
+      └ NMSource    RecordSource protocol + SyntheticSource
+nmcapd          CLI that wires them together
+nmtest          test suite executable
+```
+
+**Module boundaries are functional, not cosmetic.** `NMCapture` must never
+import `NMFlow` or `NMAnalyzers`: it is the only code holding a root-privileged
+BPF handle, and keeping it free of parsers is what makes a later split into a
+small root capturer plus an unprivileged analyzer a `main.swift` change instead
+of a rewrite. The two are coupled only through `PacketContext`
+(`Sources/NMFlow/PacketContext.swift`) and one bridging function,
+`makeContext` in `Sources/nmcapd/FlowMode.swift`. Keep that seam thin.
+
+L3/L4 parsers live in `NMFlow`, not in an analyzer module, because building a
+flow key requires them — putting them above `NMFlow` would be circular.
+
+`RecordSource` + `SyntheticSource` exist so everything above the packet parser
+(storage, rollups, retention, IPC, UI) can be built and benchmarked with **no
+root and no pcap code**. That is why the storage layer was already benchmarked
+at 50k rows/min before any UI existed. Preserve this property.
+
+## The PKTAP foundation
+
+macOS's `pktap` pseudo-interface prefixes every captured packet with kernel
+metadata naming the pid, process name and Mach-O UUID of the socket owner, plus
+an *effective* pid when a proxy process carries traffic on an application's
+behalf. That needs root but no NetworkExtension entitlement, and it is the whole
+reason this product is not just a Zeek port.
+
+**`net/pktap.h` is not in the SDK.** `struct nm_pktap_header` in
+`Sources/CPktap/include/CPktap.h` is a reconstruction, pinned by
+`_Static_assert` on every field offset in `shim.c`. Verified against live kernel
+output on macOS 26.6.2.
+
+Things that were established by experiment and must not be "corrected" back:
+
+- **PKTAP framing is opt-in.** `pcap_create("pktap,all")` alone activates
+  cleanly and returns `DLT_RAW` (12) — bare IP with no metadata. You must call
+  `pcap_set_want_pktap(h, 1)` before activate. It is exported from libpcap but
+  absent from the public headers, so it is declared in `CPktap.h`.
+- **Direction flags:** `flags & 0x3 == 0x1` is inbound, `0x2` is outbound.
+  Verified by correlating live packets against this host's own addresses. XNU's
+  own comments on those macros are transposed relative to their names.
+- **`pth_pid` and `pth_epid` can be `-1`** (no attribution; forwarded traffic,
+  inbound packets before a socket is associated). `epid` is only populated on
+  genuine delegation, which is the exception, not the rule. Never treat `-1` as
+  a pid — use `attributedPID` / `effectivePID`.
+- **Apple's `struct pcap_pkthdr` is 280 bytes**, not the 24 every portable
+  libpcap example assumes (trailing `char comment[256]`). Never redeclare it in
+  Swift; import through `CPktap`.
+- **Savefile link type is 149, not 258.** Apple's tcpdump dissects 149 fully and
+  reports `UNSUPPORTED` for 258; Wireshark is the other way round. The ring
+  writes 149 so captures open in the tcpdump every Mac has;
+  `PcapFileWriter.rewriteLinkType` converts four header bytes for Wireshark
+  export. Apple's tcpdump writes **pcapng** for pktap captures, not classic pcap.
+- **`debug.bpf_maxbufsize` defaults to 512 KB** — about 4 ms of gigabit traffic.
+  `CaptureSession.open()` raises it to 16 MB; SIP does not block this.
+
+## Security posture
+
+`nmcapd` runs as root and parses attacker-controlled bytes.
+
+**`UnsafeRawBufferPointer`'s bounds check is a `_debugPrecondition` and is
+compiled out under `-O`.** A release build has *no* automatic protection on the
+packet path. Every read therefore goes through `ByteReader`
+(`Sources/NMCore/ByteReader.swift`), which checks explicitly. **No parser may
+touch a raw pointer directly** — this is a lint rule, not a style preference.
+
+Related invariants:
+
+- `ByteReader.need` is written `limit - offset >= n`, never `offset + n <= limit`
+  — the latter overflows for a wire-supplied length and the overflowed
+  comparison *passes*.
+- Every wire length is clamped against what was captured; every loop has a hard
+  cap (see `Limits` in `Sources/NMCore/Paths.swift`).
+- The flow hash is seeded per process (`FlowHashSeed`). A fixed hash lets an
+  attacker craft colliding 5-tuples and turn the flow table into a linked list.
+- `FlowTable` has a hard capacity and sheds half-open flows first. Shed flows are
+  **aggregated** into one record per (process, destination, port, state) — the
+  aggregate itself is capped too.
+- X.509 parsing, when it arrives, goes to `SecCertificate*`. Do not hand-write a
+  DER parser in this process.
+
+## Honesty invariants
+
+The product's value depends on not presenting guesses as facts. These are
+deliberate and should not be "simplified away":
+
+- A monotonic `lossEpoch` advances on any capture drop; flows spanning one are
+  marked `captureLossSuspected` and their byte counts render as approximate.
+- Loopback is tapped twice by the kernel (once per endpoint). Only the outbound
+  copy is counted, or every localhost byte doubles — but both are fed to the
+  state machine so a handshake is not missed.
+- IP `total_length` is routinely 0 at the host stack because TSO/LRO offload
+  fills it in later. Falling back to the captured length is normal operation,
+  not error handling; the fallback sets `clamped`.
+- Direction calibration refuses to conclude anything when it has no
+  locally-sourced packets to compare against.
+- TLS 1.3 encrypts the Certificate message, and ECH makes the visible SNI not
+  the real destination. The UI must say "encrypted" / flag `sniIsOuter` rather
+  than showing a confident wrong hostname.
+
+## Storage
+
+Measured on this machine with `--bench`, not estimated:
+
+| | 5k conn/min (realistic) | 50k conn/min (heavy) |
+|---|---|---|
+| sustained write | 59k rows/s | 60k rows/s |
+| headroom vs target | 708x | 72x |
+| bytes/row (incl. indices) | 182 | 175 |
+| 30-day raw retention | 60 GB | 579 GB |
+
+**SQLite's write path is not a constraint — disk is.** At 50k rows/min a 30-day
+raw retention does not fit a 466 GB disk, so tiered retention is the default and
+Settings must show a measured projection.
+
+Design consequences, all measured:
+
+- Retention is **day-partitioned files**: rotate by `rename()`, drop by
+  `unlink()`. A single DB with nightly `DELETE` writes every freed page to the
+  WAL (costlier than the insert), never shrinks, and `VACUUM` takes an exclusive
+  lock for minutes.
+- Sealed archives get extra read indices at zero cost to the hot write path, and
+  have no `-wal`/`-shm` at all.
+- **Suffix search compiles to a range, never `LIKE`.** `LIKE 'com.apple.%'`
+  produces a full index `SCAN` (SQLite will not use an index for a `LIKE` prefix
+  under the default case-insensitive collation); `>= 'com.apple.' AND
+  < 'com.apple/'` produces a `SEARCH`. Measured 9.90 ms vs 0.56 ms.
+- Addresses are stored as **BLOBs** in native width so CIDR compiles to
+  `BETWEEN` — an index range scan. As TEXT the same filter is a full scan.
+- Pagination is **keyset**, never `OFFSET`: measured 0.07 ms vs 8.26 ms at 500k
+  rows, and `OFFSET` is also incorrect under concurrent inserts.
+- The Overview screen reads **only** rollup tables. The same aggregate costs
+  0.21 ms from rollups and 210 ms from raw rows.
+- Hostnames, SNI and DNS query names share one `meta.name` dimension (they are
+  the same namespace), with the reversed spelling stored once there rather than
+  per row. TLS fingerprints are interned in `meta.fingerprint`. This cut
+  bytes/row from 257 to 175.
+- `SQLITE_MAX_ATTACHED` is 10 in this build; `meta`/`rollup`/`pcap` take three,
+  leaving seven for day files. Queries spanning more must use rollups or merge
+  per-file in Swift.
+- Statements must be reset after stepping or SQLite refuses to `COMMIT` with
+  error 5, "SQL statements in progress" — an error that surfaces far from its
+  cause. `Statement.step()` auto-resets on `SQLITE_DONE` to make the whole class
+  of bug impossible.
+
+## Concurrency
+
+Swift 6 language mode on every target.
+
+- Capture loop: a dedicated `Thread` running blocking `pcap_dispatch`. Not
+  `pcap_setnonblock` (spins), not `DispatchSource` (GCD latency).
+- The packet path uses thread-confined classes that are deliberately **not**
+  `Sendable`, so the compiler prevents sharing. That is stricter than an actor
+  and free — an actor would put a suspension point on the per-packet path, and
+  at ~1 µs/packet that is the entire budget.
+- Actors are for cold paths only: `StoreWriter`, and later the XPC listener.
+- `nonisolated(unsafe)` has exactly one justified use: the `@convention(c)` pcap
+  callback's context pointer.
+
+## Verification state
+
+| Layer | Status |
+|---|---|
+| PKTAP decode | Verified against live kernel output and Apple's tcpdump |
+| Flow tracking | 1.02M pps steady; bounded at capacity under SYN flood |
+| Storage | Benchmarked to 60k rows/s; schema and query plans measured |
+| DNS / TLS analyzers | Not started |
+| XPC, retention/seal, SwiftUI app, install scripts | Not started |
+
+Two probes from the plan remain unverified and both need root:
+**P4** (does lo0 really double-tap as assumed) and **P5** (does `pth_epid` on
+DNS packets name the *requesting* application — the pid-keyed DNS cache degrades
+gracefully to wildcard if not).
