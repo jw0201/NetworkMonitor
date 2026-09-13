@@ -69,6 +69,12 @@ Everything distinctive follows from that:
                       │  DNS · TLS           │   │  RecordSource      │
                       │  JA4/JA3 · X.509     │   │  SyntheticSource   │
                       └──────────────────────┘   └────────────────────┘
+
+                      ┌──────────────────────────────────────────────┐
+                      │  NMIPC                                       │
+                      │  wire types · LiveRing · DaemonServer        │
+                      │  DaemonClient · Authorization                │
+                      └──────────────────────────────────────────────┘
 ```
 
 ### The one boundary that is load-bearing
@@ -387,7 +393,85 @@ per-file in Swift.
 
 ---
 
-## 8. Security model
+## 8. IPC layer (`NMIPC`)
+
+Two processes have to talk:
+
+```
+NetworkMonitor.app  (logged-in user)  ←──→  nmcapd  (root)
+  draws the screen                            captures packets, owns the store
+```
+
+### The channel is deliberately not uniform
+
+| Channel | Mechanism | Why |
+|---|---|---|
+| **Bulk history** (log browser, drill-downs, export) | app opens SQLite **read-only, directly** | proxying a million-row scan costs 5–10× in serialisation, and makes the capture daemon spend CPU on table scans instead of draining the BPF buffer |
+| **Live state** (throughput, open connections) | **XPC push**, 1–4 Hz | a flow is written when it **closes**, so every currently-open connection exists nowhere but in the daemon's memory — polling the store returns the recent past and misses the present |
+| **Control** (config, retention, rotation) | XPC + Authorization Services | needs authenticated peer identity and a human's approval |
+| **Query fallback** | XPC | for users not in the readers group, and while a hot WAL is recovering |
+
+Localhost TCP was rejected for a specific reason: it has **no peer identity**,
+so any local process, any sandboxed app, and — via DNS rebinding — any web page
+can reach it. A unix socket is better but leaves peer credentials, framing and
+reconnection to be hand-rolled, and gives nothing XPC does not.
+
+### LiveRing
+
+The daemon's in-memory view of *now*. Fed at packet rate by a thread that must
+never block, so everything in it is bounded:
+
+| | Cap |
+|---|---|
+| per-second history | 600 s |
+| open flows tracked | 2,048 |
+| distinct processes | 256 |
+
+Idle seconds are **filled with zeroes rather than skipped** — a chart that
+interpolates across a gap implies traffic that did not happen.
+
+Per-process totals are recomputed from open flows plus anything closed inside
+the window, never accumulated. Counting only on close makes a machine holding a
+few long-lived connections show no traffic at all.
+
+### Authorization
+
+**The daemon decides, never the client.** The client is a separate binary a user
+can replace or patch, so a privilege check it performs on itself is decoration.
+
+Authorization Services is used rather than a home-made group check because the
+decision is then made by `authd`: a patched client would have to forge authd's
+answer, which it cannot reach. The client obtains an `AuthorizationExternalForm`
+(raising the standard admin prompt, which only a process with a UI session can
+do), and the daemon converts it back and **re-evaluates the right itself**.
+
+A group-membership fallback exists for unsigned development builds and is marked
+as strictly weaker — it proves *who* the caller is, not that a human approved
+*this action*.
+
+**Peer identity never uses the pid.** Pids are recycled, so a check against one
+is a check against whoever holds it now. Identity comes from the code-signing
+requirement and the effective uid.
+
+### Client behaviour
+
+Two things that decide whether the tool is kept or uninstalled:
+
+- It **unsubscribes when its window is occluded**. The daemon stops producing
+  the moment nobody is listening.
+- It **reconnects with capped backoff**. The daemon restarts on upgrade and on
+  KeepAlive bounces; an app needing relaunch after each one is broken in
+  practice even though each individual failure is "correct".
+
+### Testing without root
+
+`--live` runs the server and a client in one process over an **anonymous
+`NSXPCListener`**. Snapshots are genuinely encoded, pushed across the boundary
+and decoded, so the wire format, push cadence, subscription lifecycle and
+payload size are all exercised. Only the launchd-registered Mach service name is
+left uncovered.
+
+## 9. Security model
 
 `nmcapd` runs as root and parses attacker-controlled bytes.
 
@@ -413,7 +497,7 @@ form a valid header, so they never reach the interesting parsers at all.
 
 ---
 
-## 9. Honesty invariants
+## 10. Honesty invariants
 
 The product's value depends on not presenting guesses as facts. These look like
 complications worth simplifying away unless the reason is written down:
@@ -431,7 +515,7 @@ complications worth simplifying away unless the reason is written down:
 
 ---
 
-## 10. Build and test
+## 11. Build and test
 
 **Command Line Tools only — no Xcode, no Homebrew, no third-party dependencies.**
 
@@ -451,6 +535,7 @@ nmcapd --make-fixture /tmp/f.pcap 200   # synthetic pktap capture
 nmcapd --replay /tmp/f.pcap             # decode and print pktap fields
 nmcapd --flows-file /tmp/f.pcap         # conn.log + DNS + TLS
 nmcapd --ingest /tmp/f.pcap [dbdir]     # whole pipeline into a real database
+nmcapd --live [secs]                    # live pipeline through the real XPC path
 nmcapd --store-info <dbdir> [--run-retention]
 nmcapd --bench-flows 4000 2000000       # flow engine throughput + flood bound
 nmcapd --bench 50000 600                # storage: rows/s, bytes/row, query plans
@@ -475,7 +560,7 @@ Plain `-k` prints everything.
 
 ---
 
-## 11. Status
+## 12. Status
 
 | Layer | State |
 |---|---|
@@ -487,7 +572,7 @@ Plain `-k` prints everything.
 | Hostname enrichment | Per-process cache verified against the shared-CDN case |
 | Storage | 60k rows/s; schema and query plans measured |
 | Retention / rotation / seal | Day arithmetic, mixed band, pcap budget covered |
-| **XPC layer** | Not started |
+| XPC layer | End-to-end over an anonymous listener; Mach service needs the installer |
 | **SwiftUI app** | Not started |
 | **Install scripts** | Not started |
 

@@ -104,7 +104,8 @@ CPktap          C shim: hand-declared struct pktap_header + Apple's real pcap he
       ├ NMFlow      L3/L4 parsers, FlowKey, FlowTable, TCPStateMachine,
       │             FlowEngine, PacketAnalyzer protocol, HostnameCache
       │   └ NMAnalyzers   DNS and TLS parsing and analysis
-      ├ NMStore     SQLite wrapper, schema, StoreWriter actor
+      ├ NMStore     SQLite wrapper, schema, StoreWriter, partition/seal/retention
+      ├ NMIPC       wire types, LiveRing, DaemonServer/Client, Authorization
       └ NMSource    RecordSource protocol + SyntheticSource
 nmcapd          CLI that wires them together
 nmtest          test suite executable
@@ -267,6 +268,28 @@ and the naive comparison reads a wrap as a 4 GB gap.
 Buffers live in `ReassemblyPool` keyed by flow slot, not in `FlowEntry` (262k
 entries × 8 KB would be 2 GB). `FlowTable.onSlotReleased` must stay wired or the
 pool fills with dead flows' buffers and refuses new ones.
+
+## IPC
+
+The channel is **hybrid, and that reverses the original plan** (DECISIONS I1):
+
+- bulk history → the app reads SQLite **directly, read-only**
+- live state → **XPC push** (open flows exist nowhere else — they are written on
+  close, so polling the store misses the present entirely)
+- control → XPC + Authorization Services
+
+Non-negotiables:
+
+- **The daemon decides authorization**, never the client. `authd` makes the call;
+  a patched client cannot forge its answer.
+- **Never identify a peer by pid** — pids are recycled.
+- The server stops pushing when the last subscriber goes; the client
+  unsubscribes on occlusion and reconnects with capped backoff.
+- `LiveRing` is fed at packet rate and is bounded everywhere. Idle seconds are
+  filled with zeroes, never skipped.
+
+Test it with `swift run nmtest` (anonymous `NSXPCListener`, no root) or see it
+with `nmcapd --live`.
 
 ## Honesty invariants
 

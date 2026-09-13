@@ -410,6 +410,85 @@ recovered from rows already in the live file after a restart.
 
 ---
 
+## Inter-process communication
+
+### I1. The channel is hybrid, not all-XPC — **REVERSED**
+
+The original plan routed everything through XPC, on the grounds that a
+read-only SQLite connection to a WAL database needs **write** access to the
+`-shm` file (readers register a read-mark in the shared-memory index), which
+makes a root-owned store awkward to read from a user process.
+
+That trap is real, but solvable: SQLite's unix VFS creates `-wal` and `-shm`
+with the same mode/uid/gid as the main database, so a `_networkmonitor` group
+plus `0770` on the directory and `0660` on the file is sufficient. The directory
+is 0770 rather than 0750 specifically because a reader must be able to *create*
+the `-shm` when the daemon is not running — with 0750 it fails only when the
+daemon is down, which is the worst possible time for a confusing error. Sealed
+archives sidestep it entirely, having no `-wal` at all.
+
+Against that, proxying bulk reads costs 5–10× in serialisation and makes the
+**capture daemon spend its CPU serving table scans instead of draining the BPF
+buffer** — trading packet loss for architectural tidiness.
+
+So: bulk history is read directly, live state and control go over XPC.
+
+### I2. Live state cannot be served from the database
+
+Not a performance choice. A flow is written when it **closes**, so every
+currently-open connection exists nowhere but in the daemon's memory. A "current
+connections" view built by polling the store would show the recent past and miss
+the present entirely.
+
+This is why `LiveRing` exists and why the live channel cannot be removed by
+making queries faster.
+
+### I3. Authorization is decided by the daemon
+
+The client is a separate binary a user can replace or patch, so a privilege
+check it performs on itself is decoration.
+
+Authorization Services rather than a home-made group check, because the decision
+is then made by `authd`: a patched client would have to forge authd's answer,
+which it cannot reach. The group-membership fallback for unsigned development
+builds is marked as strictly weaker — it proves who the caller is, not that a
+human approved this action.
+
+### I4. Peer identity never uses the pid
+
+Pids are recycled. A check against one is a check against whoever holds it now.
+Identity comes from the code-signing requirement and the effective uid, both
+captured once at accept time.
+
+### I5. The daemon stops producing when nobody is listening
+
+A background monitor that keeps serialising snapshots for an occluded window
+burns battery for nothing, and that is the kind of thing that gets a tool
+uninstalled rather than filed as a bug. The client unsubscribes on occlusion and
+the server's push timer stops when the last subscriber goes.
+
+The client also reconnects with capped backoff: the daemon restarts on upgrade
+and on KeepAlive bounces, and an app that needs relaunching after each one is
+broken in practice even though each individual failure is "correct".
+
+### I6. Live per-process totals come from open flows, not from closes
+
+The first version accumulated only when a flow ended, so a machine holding a few
+long-lived connections showed **no per-process traffic at all** — which on a
+real machine is most of the interesting traffic. Totals are now recomputed each
+refresh from the open flows plus anything closed inside the window, which also
+removes any chance of counting a flow once while open and again when it closes.
+
+> Found by running `--live` and seeing an empty "Top processes" section.
+
+### I7. Wire payloads are versioned JSON in `Data`, not @objc types
+
+The daemon and the app are separate binaries that can be updated independently —
+a user can replace the app while the daemon keeps running. Encoding the domain
+types directly would couple the protocol to every internal refactor, and an
+@objc protocol is awkward to version. Both sides check `wireVersion` and report
+a mismatch rather than silently accepting a payload they may misread.
+
 ## Concurrency
 
 ### N1. The packet path uses thread-confined classes, not actors
